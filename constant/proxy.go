@@ -41,6 +41,7 @@ const (
 	TypeCustom         = "custom"   //H
 	TypeAwg            = "awg"      //H
 	TypeBalancer       = "balancer" //H
+	TypeDNSTT          = "dnstt"    //H
 )
 
 const (

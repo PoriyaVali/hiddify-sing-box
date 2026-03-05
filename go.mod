@@ -23,7 +23,7 @@ require (
 	github.com/libdns/alidns v1.0.6-beta.3
 	github.com/libdns/cloudflare v0.2.2
 	github.com/logrusorgru/aurora v2.0.3+incompatible
-	github.com/mahsanet/dnstt v0.0.0-20260208072932-d75b50056612
+	github.com/mahsanet/dnstt v0.0.0-20260208072530-0ad0213669c6
 	github.com/metacubex/utls v1.8.4
 	github.com/mholt/acmez/v3 v3.1.4
 	github.com/miekg/dns v1.1.69
