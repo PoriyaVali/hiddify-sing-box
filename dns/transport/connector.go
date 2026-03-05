@@ -125,16 +125,18 @@ func (c *Connector[T]) dialWithCancellation(ctx context.Context) (T, error) {
 
 func (c *Connector[T]) Close() error {
 	c.access.Lock()
-	defer c.access.Unlock()
 
 	if c.closed {
+		c.access.Unlock()
 		return nil
 	}
+	hasConnectiopn := c.hasConnection
 	c.closed = true
+	c.hasConnection = false
+	c.access.Unlock()
 
-	if c.hasConnection {
+	if hasConnectiopn {
 		c.callbacks.Close(c.connection)
-		c.hasConnection = false
 	}
 
 	return nil
