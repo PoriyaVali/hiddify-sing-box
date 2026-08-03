@@ -21,18 +21,14 @@ import (
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/block"
 	"github.com/sagernet/sing-box/protocol/direct"
-	protocolDNS "github.com/sagernet/sing-box/protocol/dns"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/group/balancer"
-	"github.com/sagernet/sing-box/protocol/hiddify/dnstt"
 	"github.com/sagernet/sing-box/protocol/hiddify/hinvalid"
 
 	"github.com/sagernet/sing-box/protocol/hiddify/xray"
 	"github.com/sagernet/sing-box/protocol/http"
-	"github.com/sagernet/sing-box/protocol/mieru"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/naive"
-	"github.com/sagernet/sing-box/protocol/psiphon"
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/shadowtls"
@@ -41,7 +37,6 @@ import (
 	"github.com/sagernet/sing-box/protocol/tor"
 	"github.com/sagernet/sing-box/protocol/trojan"
 	"github.com/sagernet/sing-box/protocol/tun"
-	"github.com/sagernet/sing-box/protocol/tunnel"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/vmess"
 	"github.com/sagernet/sing-box/service/resolved"
@@ -72,7 +67,6 @@ func InboundRegistry() *inbound.Registry {
 	shadowtls.RegisterInbound(registry)
 	vless.RegisterInbound(registry)
 	anytls.RegisterInbound(registry)
-	mieru.RegisterInbound(registry)
 	ssh.RegisterInbound(registry)
 
 	registerQUICInbounds(registry)
@@ -87,7 +81,6 @@ func OutboundRegistry() *outbound.Registry {
 	direct.RegisterOutbound(registry)
 
 	block.RegisterOutbound(registry)
-	protocolDNS.RegisterOutbound(registry)
 
 	group.RegisterSelector(registry)
 	group.RegisterURLTest(registry)
@@ -102,16 +95,12 @@ func OutboundRegistry() *outbound.Registry {
 	ssh.RegisterOutbound(registry)
 	shadowtls.RegisterOutbound(registry)
 	vless.RegisterOutbound(registry)
-	psiphon.RegisterOutbound(registry)
-	mieru.RegisterOutbound(registry)
 	anytls.RegisterOutbound(registry)
 	hinvalid.RegisterOutbound(registry)
 	xray.RegisterOutbound(registry)
-	dnstt.RegisterOutbound(registry)
 	balancer.RegisterLoadBalance(registry)
 
 	registerQUICOutbounds(registry)
-	registerWireGuardOutbound(registry)
 	registerStubForRemovedOutbounds(registry)
 
 	return registry
@@ -120,8 +109,6 @@ func OutboundRegistry() *outbound.Registry {
 func EndpointRegistry() *endpoint.Registry {
 	registry := endpoint.NewRegistry()
 
-	tunnel.RegisterServerEndpoint(registry)
-	tunnel.RegisterClientEndpoint(registry)
 
 	registerWireGuardEndpoint(registry)
 	registerTailscaleEndpoint(registry)
@@ -174,5 +161,8 @@ func registerStubForRemovedInbounds(registry *inbound.Registry) {
 func registerStubForRemovedOutbounds(registry *outbound.Registry) {
 	outbound.Register[option.ShadowsocksROutboundOptions](registry, C.TypeShadowsocksR, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksROutboundOptions) (adapter.Outbound, error) {
 		return nil, E.New("ShadowsocksR is deprecated and removed in sing-box 1.6.0")
+	})
+	outbound.Register[option.StubOptions](registry, C.TypeWireGuard, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.StubOptions) (adapter.Outbound, error) {
+		return nil, E.New("WireGuard outbound is deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, use WireGuard endpoint instead")
 	})
 }

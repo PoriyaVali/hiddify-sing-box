@@ -6,7 +6,6 @@ import (
 	"context"
 	"net/netip"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -200,7 +199,7 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
 			if domain.Domain == "." && domain.RoutingOnly && !t.acceptDefaultResolvers {
 				continue
 			}
-			if strings.HasSuffix(question.Name, domain.Domain) {
+			if mDNS.IsSubDomain(domain.Domain, question.Name) {
 				selectedLink = link
 			}
 		}
@@ -248,7 +247,7 @@ func (t *Transport) tryOneName(ctx context.Context, servers *LinkServers, messag
 	sLen := uint32(len(servers.Servers))
 	var lastErr error
 	for i := 0; i < t.attempts; i++ {
-		for j := uint32(0); j < sLen; j++ {
+		for j := range sLen {
 			server := servers.Servers[(serverOffset+j)%sLen]
 			question := message.Question[0]
 			question.Name = fqdn

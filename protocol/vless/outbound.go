@@ -27,6 +27,8 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.VLESSOutboundOptions](registry, C.TypeVLESS, NewOutbound)
 }
 
+var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+
 type Outbound struct {
 	outbound.Adapter
 	logger          logger.ContextLogger
@@ -83,7 +85,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		case "xudp":
 			outbound.xudp = true
 		default:
-			return nil, E.New("unknown packet encoding: ", options.PacketEncoding)
+			return nil, E.New("unknown packet encoding: ", *options.PacketEncoding)
 		}
 	}
 	outbound.client, err = vless.NewClient(options.UUID, options.Flow, logger)
@@ -127,6 +129,10 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	}
 }
 
+func (h *Outbound) MultiplexEnabled() bool {
+	return h.multiplexDialer != nil
+}
+
 func (h *Outbound) InterfaceUpdated() {
 	if h.transport != nil {
 		h.transport.Close()
@@ -167,7 +173,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 		if h.xudp {
 			return h.client.DialEarlyXUDPPacketConn(conn, destination)
 		} else if h.packetAddr {
-			if destination.IsFqdn() {
+			if destination.IsDomain() {
 				return nil, E.New("packetaddr: domain destination is not supported")
 			}
 			packetConn, err := h.client.DialEarlyPacketConn(conn, M.Socksaddr{Fqdn: packetaddr.SeqPacketMagicAddress})
@@ -204,7 +210,7 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	if h.xudp {
 		return h.client.DialEarlyXUDPPacketConn(conn, destination)
 	} else if h.packetAddr {
-		if destination.IsFqdn() {
+		if destination.IsDomain() {
 			return nil, E.New("packetaddr: domain destination is not supported")
 		}
 		conn, err := h.client.DialEarlyPacketConn(conn, M.Socksaddr{Fqdn: packetaddr.SeqPacketMagicAddress})

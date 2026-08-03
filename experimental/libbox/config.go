@@ -3,6 +3,7 @@ package libbox
 import (
 	"bytes"
 	"context"
+	"net/netip"
 	"os"
 
 	box "github.com/sagernet/sing-box"
@@ -154,6 +155,10 @@ func (s *platformInterfaceStub) SendNotification(notification *adapter.Notificat
 	return nil
 }
 
+func (s *platformInterfaceStub) MyInterfaceAddress() []netip.Addr {
+	return nil
+}
+
 func (s *platformInterfaceStub) UsePlatformLocalDNSTransport() bool {
 	return false
 }
@@ -194,8 +199,8 @@ func (s *interfaceMonitorStub) UnregisterCallback(element *list.Element[tun.Defa
 func (s *interfaceMonitorStub) RegisterMyInterface(interfaceName string) {
 }
 
-func (s *interfaceMonitorStub) MyInterface() string {
-	return ""
+func (s *interfaceMonitorStub) MyInterfaces() []string {
+	return nil
 }
 
 func FormatConfig(configContent string) (*StringBox, error) {

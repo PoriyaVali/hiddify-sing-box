@@ -176,7 +176,7 @@ func (s *StartedService) StartOrReloadServiceOptions(profileOptions option.Optio
 func (s *StartedService) startOrReloadServiceImp(profileOptions *option.Options, profileContent string, options *OverrideOptions) error {
 	s.serviceAccess.Lock()
 	switch s.serviceStatus.Status {
-	case ServiceStatus_IDLE, ServiceStatus_STARTED, ServiceStatus_STARTING:
+	case ServiceStatus_IDLE, ServiceStatus_STARTED, ServiceStatus_STARTING, ServiceStatus_FATAL:
 	default:
 		s.serviceAccess.Unlock()
 		return os.ErrInvalid
@@ -236,13 +236,14 @@ func (s *StartedService) CloseService() error {
 		return os.ErrInvalid
 	}
 	s.updateStatus(ServiceStatus_STOPPING)
-	if s.instance != nil {
-		err := s.instance.Close()
+	instance := s.instance
+	s.instance = nil
+	if instance != nil {
+		err := instance.Close()
 		if err != nil {
 			return s.updateStatusError(err)
 		}
 	}
-	s.instance = nil
 	s.startedAt = time.Time{}
 	s.updateStatus(ServiceStatus_IDLE)
 	s.serviceAccess.Unlock()
@@ -613,10 +614,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 				return false
 			}
 			_, isGroup := it.(adapter.OutboundGroup)
-			if isGroup {
-				return false
-			}
-			return true
+			return !isGroup
 		})
 		b, _ := batch.New(boxService.ctx, batch.WithConcurrencyNum[any](10))
 		for _, detour := range outbounds {
@@ -960,11 +958,11 @@ func buildConnectionProto(metadata *trafficontrol.TrackerMetadata) *Connection {
 	var processInfo *ProcessInfo
 	if metadata.Metadata.ProcessInfo != nil {
 		processInfo = &ProcessInfo{
-			ProcessId:   metadata.Metadata.ProcessInfo.ProcessID,
-			UserId:      metadata.Metadata.ProcessInfo.UserId,
-			UserName:    metadata.Metadata.ProcessInfo.UserName,
-			ProcessPath: metadata.Metadata.ProcessInfo.ProcessPath,
-			PackageName: metadata.Metadata.ProcessInfo.AndroidPackageName,
+			ProcessId:    metadata.Metadata.ProcessInfo.ProcessID,
+			UserId:       metadata.Metadata.ProcessInfo.UserId,
+			UserName:     metadata.Metadata.ProcessInfo.UserName,
+			ProcessPath:  metadata.Metadata.ProcessInfo.ProcessPath,
+			PackageNames: metadata.Metadata.ProcessInfo.AndroidPackageNames,
 		}
 	}
 	return &Connection{
