@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/sagernet/gvisor/pkg/buffer"
@@ -43,7 +42,6 @@ type stackDevice struct {
 	outbound       chan *stack.PacketBuffer
 	packetOutbound chan *buf.Buffer
 	done           chan struct{}
-	closeOnce      sync.Once
 	dispatcher     stack.NetworkDispatcher
 	inet4Address   netip.Addr
 	inet6Address   netip.Addr
@@ -93,7 +91,7 @@ func newStackDevice(options DeviceOptions) (*stackDevice, error) {
 	if options.Handler != nil {
 		ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tun.NewTCPForwarder(options.Context, ipStack, options.Handler).HandlePacket)
 		ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, tun.NewUDPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout).HandlePacket)
-		icmpForwarder := tun.NewICMPForwarder(options.Context, ipStack, options.Handler, options.ICMPTimeout)
+		icmpForwarder := tun.NewICMPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout)
 		icmpForwarder.SetLocalAddresses(inet4Address, inet6Address)
 		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
 		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
@@ -148,17 +146,11 @@ func (w *stackDevice) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	}
 	var networkProtocol tcpip.NetworkProtocolNumber
 	if destination.IsIPv4() {
-		if !w.inet4Address.IsValid() {
-			return nil, E.New("missing IPv4 local address")
-		}
 		networkProtocol = header.IPv4ProtocolNumber
 		bind.Addr = tun.AddressFromAddr(w.inet4Address)
 	} else {
-		if !w.inet6Address.IsValid() {
-			return nil, E.New("missing IPv6 local address")
-		}
 		networkProtocol = header.IPv6ProtocolNumber
-		bind.Addr = tun.AddressFromAddr(w.inet6Address)
+		bind.Addr = tun.AddressFromAddr(w.inet4Address)
 	}
 	udpConn, err := gonet.DialUDP(w.stack, &bind, nil, networkProtocol)
 	if err != nil {
@@ -252,15 +244,13 @@ func (w *stackDevice) Events() <-chan wgTun.Event {
 }
 
 func (w *stackDevice) Close() error {
-	w.closeOnce.Do(func() {
-		close(w.done)
-		close(w.events)
-		w.stack.Close()
-		for _, endpoint := range w.stack.CleanupEndpoints() {
-			endpoint.Abort()
-		}
-		w.stack.Wait()
-	})
+	close(w.done)
+	close(w.events)
+	w.stack.Close()
+	for _, endpoint := range w.stack.CleanupEndpoints() {
+		endpoint.Abort()
+	}
+	w.stack.Wait()
 	return nil
 }
 

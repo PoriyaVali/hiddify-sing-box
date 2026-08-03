@@ -63,7 +63,7 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		}
 		if rawPeer.Endpoint.Addr.IsValid() {
 			peer.endpoint = rawPeer.Endpoint.AddrPort()
-		} else if rawPeer.Endpoint.IsDomain() {
+		} else if rawPeer.Endpoint.IsFqdn() {
 			peer.destination = rawPeer.Endpoint
 		}
 		publicKeyBytes, err := base64.StdEncoding.DecodeString(rawPeer.PublicKey)
@@ -109,7 +109,6 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		System:         options.System,
 		Handler:        options.Handler,
 		UDPTimeout:     options.UDPTimeout,
-		ICMPTimeout:    options.ICMPTimeout,
 		CreateDialer:   options.CreateDialer,
 		Name:           options.Name,
 		MTU:            options.MTU,
@@ -136,13 +135,13 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 
 func (e *Endpoint) Start(resolve bool) error {
 	if common.Any(e.peers, func(peer peerConfig) bool {
-		return !peer.endpoint.IsValid() && peer.destination.IsDomain()
+		return !peer.endpoint.IsValid() && peer.destination.IsFqdn()
 	}) {
 		if !resolve {
 			return nil
 		}
 		for peerIndex, peer := range e.peers {
-			if peer.endpoint.IsValid() || !peer.destination.IsDomain() {
+			if peer.endpoint.IsValid() || !peer.destination.IsFqdn() {
 				continue
 			}
 			destinationAddress, err := e.options.ResolvePeer(peer.destination.Fqdn)
@@ -183,10 +182,10 @@ func (e *Endpoint) Start(resolve bool) error {
 		return err
 	}
 	logger := &device.Logger{
-		Verbosef: func(format string, args ...any) {
+		Verbosef: func(format string, args ...interface{}) {
 			e.options.Logger.Debug(fmt.Sprintf(strings.ToLower(format), args...))
 		},
-		Errorf: func(format string, args ...any) {
+		Errorf: func(format string, args ...interface{}) {
 			e.options.Logger.Error(fmt.Sprintf(strings.ToLower(format), args...))
 		},
 	}
@@ -198,15 +197,13 @@ func (e *Endpoint) Start(resolve bool) error {
 	}
 	wgDevice := device.NewDevice(e.options.Context, deviceInput, bind, logger, e.options.Workers)
 	e.tunDevice.SetDevice(wgDevice)
-	var ipcConf strings.Builder
-	ipcConf.WriteString(e.ipcConf)
+	ipcConf := e.ipcConf
 	for _, peer := range e.peers {
-		ipcConf.WriteString(peer.GenerateIpcLines())
+		ipcConf += peer.GenerateIpcLines()
 	}
-	err = wgDevice.IpcSet(ipcConf.String())
+	err = wgDevice.IpcSet(ipcConf)
 	if err != nil {
-		wgDevice.Close()
-		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
+		return E.Cause(err, "setup wireguard: \n", ipcConf)
 	}
 	e.device = wgDevice
 	e.pause = service.FromContext[pause.Manager](e.options.Context)
@@ -232,14 +229,11 @@ func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 }
 
 func (e *Endpoint) Close() error {
+	if e.device != nil {
+		e.device.Close()
+	}
 	if e.pauseCallback != nil {
 		e.pause.UnregisterCallback(e.pauseCallback)
-		e.pauseCallback = nil
-	}
-	if e.device != nil {
-		e.device.Down()
-		e.device.Close()
-		e.device = nil
 	}
 	return nil
 }
@@ -278,21 +272,20 @@ type peerConfig struct {
 }
 
 func (c peerConfig) GenerateIpcLines() string {
-	var ipcLines strings.Builder
-	ipcLines.WriteString("\npublic_key=" + c.publicKeyHex)
+	ipcLines := "\npublic_key=" + c.publicKeyHex
 	if c.endpoint.IsValid() {
-		ipcLines.WriteString("\nendpoint=" + c.endpoint.String())
+		ipcLines += "\nendpoint=" + c.endpoint.String()
 	}
 	if c.preSharedKeyHex != "" {
-		ipcLines.WriteString("\npreshared_key=" + c.preSharedKeyHex)
+		ipcLines += "\npreshared_key=" + c.preSharedKeyHex
 	}
 	for _, allowedIP := range c.allowedIPs {
-		ipcLines.WriteString("\nallowed_ip=" + allowedIP.String())
+		ipcLines += "\nallowed_ip=" + allowedIP.String()
 	}
 	if c.keepalive > 0 {
-		ipcLines.WriteString("\npersistent_keepalive_interval=" + F.ToString(c.keepalive))
+		ipcLines += "\npersistent_keepalive_interval=" + F.ToString(c.keepalive)
 	}
-	return ipcLines.String()
+	return ipcLines
 }
 
 func (e *Endpoint) IsReady() bool {

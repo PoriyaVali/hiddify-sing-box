@@ -140,6 +140,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if ruleIndex == 0 {
 		ruleIndex = tun.DefaultIPRoute2RuleIndex
 	}
+	autoRedirectFallbackRuleIndex := options.AutoRedirectFallbackRuleIndex
+	if autoRedirectFallbackRuleIndex == 0 {
+		autoRedirectFallbackRuleIndex = tun.DefaultIPRoute2AutoRedirectFallbackRuleIndex
+	}
 	inputMark := uint32(options.AutoRedirectInputMark)
 	if inputMark == 0 {
 		inputMark = tun.DefaultAutoRedirectInputMark

@@ -5,7 +5,6 @@ package wireguard
 import (
 	"context"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/sagernet/gvisor/pkg/buffer"
@@ -21,6 +20,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/ping"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/wireguard-go/device"
@@ -35,7 +35,6 @@ type systemStackDevice struct {
 	stack     *stack.Stack
 	endpoint  *deviceEndpoint
 	writeBufs [][]byte
-	closeOnce sync.Once
 }
 
 func newSystemStackDevice(options DeviceOptions) (*systemStackDevice, error) {
@@ -78,7 +77,7 @@ func newSystemStackDevice(options DeviceOptions) (*systemStackDevice, error) {
 	if options.Handler != nil {
 		ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tun.NewTCPForwarder(options.Context, ipStack, options.Handler).HandlePacket)
 		ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, tun.NewUDPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout).HandlePacket)
-		icmpForwarder := tun.NewICMPForwarder(options.Context, ipStack, options.Handler, options.ICMPTimeout)
+		icmpForwarder := tun.NewICMPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout)
 		icmpForwarder.SetLocalAddresses(inet4Address, inet6Address)
 		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
 		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
@@ -105,13 +104,13 @@ func (w *systemStackDevice) Write(bufs [][]byte, offset int) (count int, err err
 			}
 		}
 		if len(w.writeBufs) > 0 {
-			return w.batchDevice.BatchWrite(w.writeBufs, offset)
+			return w.batchDevice.BatchWrite(bufs, offset)
 		}
 	} else {
 		for _, packet := range bufs {
 			if !w.writeStack(packet[offset:]) {
 				if tun.PacketOffset > 0 {
-					clear(packet[offset-tun.PacketOffset : offset])
+					common.ClearArray(packet[offset-tun.PacketOffset : offset])
 					tun.PacketFillHeader(packet[offset-tun.PacketOffset:], tun.PacketIPVersion(packet[offset:]))
 				}
 				_, err = w.device.Write(packet[offset-tun.PacketOffset:])
@@ -126,17 +125,13 @@ func (w *systemStackDevice) Write(bufs [][]byte, offset int) (count int, err err
 }
 
 func (w *systemStackDevice) Close() error {
-	var err error
-	w.closeOnce.Do(func() {
-		close(w.endpoint.done)
-		w.stack.Close()
-		for _, endpoint := range w.stack.CleanupEndpoints() {
-			endpoint.Abort()
-		}
-		w.stack.Wait()
-		err = w.systemDevice.Close()
-	})
-	return err
+	close(w.endpoint.done)
+	w.stack.Close()
+	for _, endpoint := range w.stack.CleanupEndpoints() {
+		endpoint.Abort()
+	}
+	w.stack.Wait()
+	return w.systemDevice.Close()
 }
 
 func (w *systemStackDevice) writeStack(packet []byte) bool {

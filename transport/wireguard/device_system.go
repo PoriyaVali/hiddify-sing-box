@@ -111,7 +111,6 @@ func (w *systemDevice) Start() error {
 	}
 	err = tunInterface.Start()
 	if err != nil {
-		tunInterface.Close()
 		return err
 	}
 	w.options.Logger.Info("started at ", w.options.Name)
@@ -148,7 +147,7 @@ func (w *systemDevice) Write(bufs [][]byte, offset int) (count int, err error) {
 	} else {
 		for _, packet := range bufs {
 			if tun.PacketOffset > 0 {
-				clear(packet[offset-tun.PacketOffset : offset])
+				common.ClearArray(packet[offset-tun.PacketOffset : offset])
 				tun.PacketFillHeader(packet[offset-tun.PacketOffset:], tun.PacketIPVersion(packet[offset:]))
 			}
 			_, err = w.device.Write(packet[offset-tun.PacketOffset:])
@@ -178,14 +177,8 @@ func (w *systemDevice) Events() <-chan wgTun.Event {
 }
 
 func (w *systemDevice) Close() error {
-	var err error
-	w.closeOnce.Do(func() {
-		close(w.events)
-		if w.device != nil {
-			err = w.device.Close()
-		}
-	})
-	return err
+	close(w.events)
+	return w.device.Close()
 }
 
 func (w *systemDevice) BatchSize() int {
