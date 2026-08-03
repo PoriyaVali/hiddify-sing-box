@@ -69,8 +69,27 @@ func NewClientWithOptions(options ClientOptions) (Config, error) {
 	return NewSTDClient(options.Context, options.Logger, options.ServerAddress, options.Options)
 }
 
+// ClientHandshake completes the TLS handshake to a server.
+//
+// The deadline is TLSHandshakeTimeout, not the general TCPTimeout, which is 15s
+// and was cutting off users on interfered networks. TCP retries a lost handshake
+// packet with exponential backoff - about 1s, 3s, 7s, 15s, 31s - so a client
+// losing one or two packets gave up almost exactly at the old limit, having
+// already paid the cost of getting that far. The matching server-side change
+// alone does not help these users: whichever side gives up first ends the
+// handshake, and this side was giving up at 15s.
+//
+// Anything between 15s and 31s would buy nothing, because no retransmission
+// lands in that gap. 60s covers the 31s retry with margin and matches the
+// server. The cost is that a genuinely dead server takes a minute to fail
+// instead of fifteen seconds - paid rarely, because anytls multiplexes and only
+// handshakes when a session starts or after it drops, which is exactly the
+// moment worth waiting for.
+//
+// TCPTimeout is untouched; the rest of the codebase shares it for dialling,
+// urltest and HTTP transports, none of which are asking this question.
 func ClientHandshake(ctx context.Context, conn net.Conn, config Config) (Conn, error) {
-	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+	ctx, cancel := context.WithTimeout(ctx, C.TLSHandshakeTimeout)
 	defer cancel()
 	tlsConn, err := aTLS.ClientHandshake(ctx, conn, config)
 	if err != nil {
