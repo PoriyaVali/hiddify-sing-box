@@ -37,7 +37,7 @@ jobs:
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             GOARM=${{ matrix.goarm }} GOMIPS=${{ matrix.gomips }} \
             go build -tags "$SB_TAGS" -trimpath \
-            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=$VER' -s -w" \
+            -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=$VER' -s -w" \
             -o "sing-box-${{ matrix.name }}${{ matrix.ext }}" ./cmd/sing-box
           ls -la "sing-box-${{ matrix.name }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
