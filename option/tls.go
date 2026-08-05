@@ -114,6 +114,14 @@ type OutboundTLSOptions struct {
 	Fragment                   bool                                `json:"fragment,omitempty"`
 	FragmentFallbackDelay      badoption.Duration                  `json:"fragment_fallback_delay,omitempty"`
 	RecordFragment             bool                                `json:"record_fragment,omitempty"`
+	// Mirage (Doctor Mobile): TLS-record fragmentation with the shape measured
+	// to defeat Iran's SNI-DPI — a small first record ending before the SNI.
+	// Unlike RecordFragment it also applies to REALITY, which is the point:
+	// it hides the borrowed server name, so that name no longer has to be a
+	// host that is unblocked from Iran. MirageOffset overrides the default
+	// first-record size (5 bytes of the handshake message).
+	Mirage                     bool                                `json:"mirage,omitempty"`
+	MirageOffset               int                                 `json:"mirage_offset,omitempty"`
 	KernelTx                   bool                                `json:"kernel_tx,omitempty"`
 	KernelRx                   bool                                `json:"kernel_rx,omitempty"`
 	ECH                        *OutboundECHOptions                 `json:"ech,omitempty"`

@@ -32,6 +32,8 @@ type UTLSClientConfig struct {
 	fragment              bool
 	fragmentFallbackDelay time.Duration
 	recordFragment        bool
+	mirage                bool
+	mirageOffset          int
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -58,7 +60,9 @@ func (c *UTLSClientConfig) STDConfig() (*STDConfig, error) {
 }
 
 func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
-	if c.recordFragment {
+	if c.mirage {
+		conn = tf.NewMirageConn(conn, c.mirageOffset)
+	} else if c.recordFragment {
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
 	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos}, nil
@@ -71,6 +75,7 @@ func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []by
 func (c *UTLSClientConfig) Clone() Config {
 	return &UTLSClientConfig{
 		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment,
+		c.mirage, c.mirageOffset,
 	}
 }
 
@@ -255,7 +260,7 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
-	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment}
+	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset}
 	if options.ECH != nil && options.ECH.Enabled {
 		if options.Reality != nil && options.Reality.Enabled {
 			return nil, E.New("Reality is conflict with ECH")

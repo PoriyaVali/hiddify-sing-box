@@ -28,6 +28,7 @@ import (
 	"unsafe"
 
 	"github.com/sagernet/sing-box/adapter"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -124,6 +125,13 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
+	// Mirage: REALITY never went through the fragment layer, so its borrowed
+	// server name sat in the clear for the censor to match on — which is why a
+	// borrowed site that is blocked from Iran killed the node. Splitting the
+	// ClientHello here hides that name, freeing the choice of borrowed site.
+	if e.uClient.mirage {
+		conn = tf.NewMirageConn(conn, e.uClient.mirageOffset)
+	}
 	uConn := utls.UClient(conn, uConfig, e.uClient.id)
 	verifier.UConn = uConn
 	err := uConn.BuildHandshakeState()
