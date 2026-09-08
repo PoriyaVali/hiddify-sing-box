@@ -106,13 +106,16 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 			}
 		}
 	}
-	// if s.lastUpdated.IsZero() {
-	// 	err := s.fetch(ctx, startContext)
-	// 	if err != nil {
-	// 		// 	return E.Cause(err, "initial rule-set: ", s.options.Tag)
-	// 		s.logger.Error(E.Cause(err, "initial rule-set: ", s.options.Tag))
-	// 	}
-	// }
+	// A cache miss is not an empty valid rule-set. Otherwise the core reports
+	// ready while bypass/block rules match nothing until a background fetch.
+	if s.lastUpdated.IsZero() {
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := s.fetch(fetchCtx, startContext)
+		cancel()
+		if err != nil {
+			return E.Cause(err, "initial rule-set: ", s.options.Tag)
+		}
+	}
 	s.startupTicker = time.NewTicker(10 * time.Second)
 	s.updateTicker = time.NewTicker(s.updateInterval)
 	return nil
@@ -271,6 +274,7 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 	if err != nil {
 		return err
 	}
+	defer response.Body.Close()
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:

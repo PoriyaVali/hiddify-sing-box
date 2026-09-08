@@ -114,10 +114,10 @@ func (m *Transport) exchangeSerial(parent context.Context, msg *mDNS.Msg) (*mDNS
 		}
 		var change bool
 		resp, change = m.filterBlocked(resp)
-		if len(resp.Answer) > 0 {
+		if hasRequestedAnswer(resp, msg) {
 			return resp, nil
 		}
-		if !change {
+		if !change && resp != nil {
 			lastResp = resp
 		}
 	}
@@ -185,11 +185,11 @@ func (m *Transport) exchangeParallel(parent context.Context, msg *mDNS.Msg) (*mD
 				continue
 			}
 			resp, change := m.filterBlocked(r.resp)
-			if len(resp.Answer) > 0 {
+			if hasRequestedAnswer(resp, msg) {
 				cancel() // stop others
 				return resp, nil
 			}
-			if !change {
+			if !change && resp != nil {
 				lastResp = resp
 			}
 		case <-m.done:
@@ -213,6 +213,9 @@ func (m *Transport) filterBlocked(msg *mDNS.Msg) (*mDNS.Msg, bool) {
 	if len(msg.Answer) == 0 {
 		return msg, false
 	}
+	// Transports may return cached/shared messages. Filtering one exchange must
+	// not mutate another caller's cached response.
+	msg = msg.Copy()
 	answers := make([]mDNS.RR, 0)
 	for _, r := range msg.Answer {
 		switch answer := r.(type) {
@@ -241,9 +244,27 @@ func (m *Transport) isBlocked(ip net.IP) bool {
 	if !netipAddr.IsValid() {
 		return true
 	}
+	netipAddr = netipAddr.Unmap()
 
 	for _, p := range m.ignoredRanges {
 		if p.Contains(netipAddr) {
+			return true
+		}
+	}
+	return false
+}
+
+// CNAMEs alone are not usable A/AAAA answers. In particular, removing a fake
+// address must not let its remaining CNAME win the race and cancel a healthy
+// resolver. Retain unmodified NODATA/NXDOMAIN/CNAME replies only as fallbacks
+// after all alternatives fail; do not reject legitimate private LAN answers.
+func hasRequestedAnswer(response, request *mDNS.Msg) bool {
+	if response == nil || response.Rcode != mDNS.RcodeSuccess || len(request.Question) == 0 {
+		return false
+	}
+	queryType := request.Question[0].Qtype
+	for _, answer := range response.Answer {
+		if answer.Header().Rrtype == queryType || queryType == mDNS.TypeANY {
 			return true
 		}
 	}
