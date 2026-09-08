@@ -55,7 +55,7 @@ func NewLocalRuleSet(ctx context.Context, logger logger.Logger, options option.R
 			return nil, err
 		}
 	} else {
-		filePath := filemanager.BasePath(ctx, options.LocalOptions.Path)
+		filePath := localRuleSetPath(ctx, options.LocalOptions.Path)
 		filePath, _ = filepath.Abs(filePath)
 		err := ruleSet.reloadFile(filePath)
 		if err != nil {
@@ -218,4 +218,24 @@ func (s *LocalRuleSet) matchStatesWithBase(metadata *adapter.InboundContext, bas
 		stateSet = stateSet.merge(matchHeadlessRuleStatesWithBase(rule, &nestedMetadata, base))
 	}
 	return stateSet
+}
+
+// Where a local rule-set file really is.
+//
+// ⚠️ `filemanager.BasePath` decides "is this already absolute?" with
+// `strings.HasPrefix(name, "/")`, which is a POSIX test. On Windows an
+// absolute path is `C:\...`, so it fails that test and gets joined to the
+// working directory: the core then tries to open
+// `C:\...\hiddify\C:\...\rulesets\singbox\geoip-ir.srs` and start fails with
+// "The filename, directory name, or volume label syntax is incorrect".
+//
+// Android never saw it because its paths do begin with `/`, which is why this
+// only ever broke the desktop build. The app supplies absolute paths by
+// contract - `applyLocalRuleSets` rejects anything else - so an absolute path
+// is used as given, and a relative one still resolves against the base.
+func localRuleSetPath(ctx context.Context, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filemanager.BasePath(ctx, path)
 }
