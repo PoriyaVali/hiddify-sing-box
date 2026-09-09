@@ -31,9 +31,48 @@ const (
 	mirageDefaultOffset = 5
 )
 
-// MirageConn splits the first ClientHello into two TLS records, both written in
-// a single TCP segment (record-level only — TCP-level splitting was measured to
-// fail here, because this DPI reassembles the TCP stream before matching).
+// MirageConn splits the first ClientHello into two TLS records, EACH IN ITS OWN
+// WRITE.
+//
+// ⚠️ The separate writes are the load-bearing part and must not be merged back
+// into one buffer for tidiness. Until 2026-09-09 both records went out in a
+// single write, and Hamrah-e Aval began dropping exactly that form in silence.
+//
+// Measured that evening on a rooted handset on MCI LTE with this core's own
+// uTLS Chrome fingerprint, against 1.1.1.1:443 with the genuinely blocked name
+// instagram.com. A shape that REACHES there has evaded; the untouched control
+// is reset, which is what proves the censor is still watching. Three rounds,
+// order rotated, 15 s between every attempt so the burst penalty below could
+// not contaminate it:
+//
+//	untouched (control)          0 reached, 3 reset
+//	two records, ONE write       0 reached, 3 dropped in silence
+//	two records, two writes      3 reached  (identical at 0, 5, 20 and 50 ms)
+//	three records, three writes  3 reached
+//	two records, split at 64     3 reached
+//
+// The same pattern held against our own REALITY node on 8443. And the sibling
+// implementation in mihomo, with the old single-write form, could not complete
+// ONE session on that carrier: a capture started before the process caught 69
+// flows, all 69 beginning with the 5-byte first record, none receiving a single
+// byte. Rebuilt with two writes, the same core on the same carrier: 52 flows,
+// 52 replies, zero failures.
+//
+// Two consequences worth keeping:
+//
+//   - The gap between writes does nothing. Zero milliseconds behaved exactly
+//     like fifty, so there is no sleep here to pay for or to fingerprint.
+//   - Six shapes passed, not one. The split point and the record count are both
+//     free variables, which is what makes the next block survivable.
+//
+// 🔑 That censor also PUNISHES bursts: six fragmented attempts back to back once
+// made plain TCP fail eight times running for about a minute. Any measurement
+// taken from closely spaced attempts records the penalty as well as the shape.
+//
+// ⚠️ Measured on MCI only. An August measurement on Irancell found the exact
+// opposite, and whether that is a carrier difference or a change over time is
+// NOT established. Neither form is universal; this is why the offset is meant
+// to be steerable from the panel rather than settled here.
 type MirageConn struct {
 	net.Conn
 	offset       int
@@ -62,10 +101,12 @@ func (c *MirageConn) Write(b []byte) (int, error) {
 	handshake := b[recordHeaderLen:]
 	first, second := handshake[:split], handshake[split:]
 
-	out := make([]byte, 0, len(b)+recordHeaderLen)
-	out = appendRecord(out, b[:3], first)
-	out = appendRecord(out, b[:3], second)
-	if _, err := c.Conn.Write(out); err != nil {
+	// One write per record. See the type comment: concatenating them is the
+	// form this censor drops.
+	if _, err := c.Conn.Write(appendRecord(nil, b[:3], first)); err != nil {
+		return 0, err
+	}
+	if _, err := c.Conn.Write(appendRecord(nil, b[:3], second)); err != nil {
 		return 0, err
 	}
 	return len(b), nil

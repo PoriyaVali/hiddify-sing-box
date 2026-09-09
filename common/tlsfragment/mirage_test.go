@@ -34,7 +34,13 @@ func TestMirageShape(t *testing.T) {
 	n, err := conn.Write(hello)
 	require.NoError(t, err)
 	require.Equal(t, len(hello), n, "Write must report the caller's length")
-	require.Equal(t, 1, cap.writes, "both records must go out in one segment")
+	// Each record in its own write. This is the guard, not a detail: the
+	// single-write form this used to require is precisely what Hamrah-e Aval
+	// began dropping on 2026-09-09 - 0 reached of 3 against a blocked name,
+	// against 3 of 3 for two writes, and 0 of 69 flows answered in the sibling
+	// core against 52 of 52 once rebuilt. Merging these writes breaks the core
+	// on that carrier.
+	require.Equal(t, 2, cap.writes, "each record must go out in its own write")
 
 	records := splitRecords(t, cap.buf.Bytes())
 	require.Len(t, records, 2, "expected exactly two TLS records")
