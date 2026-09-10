@@ -122,6 +122,13 @@ type OutboundTLSOptions struct {
 	// first-record size (5 bytes of the handshake message).
 	Mirage                     bool                                `json:"mirage,omitempty"`
 	MirageOffset               int                                 `json:"mirage_offset,omitempty"`
+	// The shape, which the offset cannot express. Two carriers measured on
+	// 2026-09-09 disagreed about it: one drops records that share a single TCP
+	// write, the other accepts either. Separate writes is the default because
+	// it is the only form measured to pass on both, and these exist so the
+	// next disagreement is a setting rather than a release.
+	MirageRecords              int                                 `json:"mirage_records,omitempty"`
+	MirageCoalesce             bool                                `json:"mirage_coalesce,omitempty"`
 	KernelTx                   bool                                `json:"kernel_tx,omitempty"`
 	KernelRx                   bool                                `json:"kernel_rx,omitempty"`
 	ECH                        *OutboundECHOptions                 `json:"ech,omitempty"`

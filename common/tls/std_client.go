@@ -29,6 +29,8 @@ type STDClientConfig struct {
 	recordFragment        bool
 	mirage                bool
 	mirageOffset          int
+	mirageRecords         int
+	mirageCoalesce        bool
 }
 
 func (c *STDClientConfig) ServerName() string {
@@ -53,7 +55,7 @@ func (c *STDClientConfig) STDConfig() (*STDConfig, error) {
 
 func (c *STDClientConfig) Client(conn net.Conn) (Conn, error) {
 	if c.mirage {
-		conn = tf.NewMirageConn(conn, c.mirageOffset)
+		conn = tf.NewMirageConn(conn, c.mirageOffset, c.mirageRecords, c.mirageCoalesce)
 	} else if c.recordFragment {
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
@@ -69,6 +71,8 @@ func (c *STDClientConfig) Clone() Config {
 		recordFragment:        c.recordFragment,
 		mirage:                c.mirage,
 		mirageOffset:          c.mirageOffset,
+		mirageRecords:         c.mirageRecords,
+		mirageCoalesce:        c.mirageCoalesce,
 	}
 }
 
@@ -204,7 +208,7 @@ func NewSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	} else if len(clientCertificate) > 0 || len(clientKey) > 0 {
 		return nil, E.New("client certificate and client key must be provided together")
 	}
-	var config Config = &STDClientConfig{ctx, &tlsConfig, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset}
+	var config Config = &STDClientConfig{ctx, &tlsConfig, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset, options.MirageRecords, options.MirageCoalesce}
 	if options.ECH != nil && options.ECH.Enabled {
 		var err error
 		config, err = parseECHClientConfig(ctx, config.(ECHCapableConfig), options)

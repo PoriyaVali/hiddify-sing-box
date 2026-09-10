@@ -29,7 +29,7 @@ func TestMirageShape(t *testing.T) {
 	t.Parallel()
 	hello := makeClientHello("www.instagram.com")
 	cap := &captureConn{}
-	conn := NewMirageConn(cap, 0)
+	conn := NewMirageConn(cap, 0, 0, false)
 
 	n, err := conn.Write(hello)
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestMirageNonClientHelloUntouched(t *testing.T) {
 	t.Parallel()
 	payload := []byte("not a tls handshake at all")
 	cap := &captureConn{}
-	conn := NewMirageConn(cap, 0)
+	conn := NewMirageConn(cap, 0, 0, false)
 
 	_, err := conn.Write(payload)
 	require.NoError(t, err)

@@ -76,14 +76,22 @@ const (
 type MirageConn struct {
 	net.Conn
 	offset       int
+	records      int
+	coalesce     bool
 	firstWritten bool
 }
 
-func NewMirageConn(conn net.Conn, offset int) *MirageConn {
+// NewMirageConn wraps conn. A records count of 0 or 1 means the measured
+// default of two; coalesce restores the single-write form, which one carrier
+// drops and another accepts.
+func NewMirageConn(conn net.Conn, offset, records int, coalesce bool) *MirageConn {
 	if offset <= 0 {
 		offset = mirageDefaultOffset
 	}
-	return &MirageConn{Conn: conn, offset: offset}
+	if records < 2 {
+		records = 2
+	}
+	return &MirageConn{Conn: conn, offset: offset, records: records, coalesce: coalesce}
 }
 
 func (c *MirageConn) Write(b []byte) (int, error) {
@@ -99,15 +107,42 @@ func (c *MirageConn) Write(b []byte) (int, error) {
 	}
 
 	handshake := b[recordHeaderLen:]
-	first, second := handshake[:split], handshake[split:]
+	parts := [][]byte{
+		appendRecord(nil, b[:3], handshake[:split]),
+		appendRecord(nil, b[:3], handshake[split:]),
+	}
+	// Extra records are carved out of the tail, AFTER the server name: a cut
+	// inside the name is the one shape measured to be dropped even for a
+	// hostname that is otherwise allowed.
+	for len(parts) < c.records {
+		tail := parts[len(parts)-1]
+		body := tail[recordHeaderLen:]
+		if len(body) < 2 {
+			break
+		}
+		at := len(body) / 2
+		parts = parts[:len(parts)-1]
+		parts = append(parts,
+			appendRecord(nil, tail[:3], body[:at]),
+			appendRecord(nil, tail[:3], body[at:]))
+	}
 
 	// One write per record. See the type comment: concatenating them is the
-	// form this censor drops.
-	if _, err := c.Conn.Write(appendRecord(nil, b[:3], first)); err != nil {
-		return 0, err
+	// form this censor drops. The panel can ask for the old shape back.
+	if c.coalesce {
+		var all []byte
+		for _, r := range parts {
+			all = append(all, r...)
+		}
+		if _, err := c.Conn.Write(all); err != nil {
+			return 0, err
+		}
+		return len(b), nil
 	}
-	if _, err := c.Conn.Write(appendRecord(nil, b[:3], second)); err != nil {
-		return 0, err
+	for _, r := range parts {
+		if _, err := c.Conn.Write(r); err != nil {
+			return 0, err
+		}
 	}
 	return len(b), nil
 }
