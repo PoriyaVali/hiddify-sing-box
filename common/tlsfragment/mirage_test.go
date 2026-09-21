@@ -10,7 +10,7 @@ import (
 )
 
 // captureConn records what was written and how many Write calls it took, so the
-// test can assert the exact wire shape (both records in ONE segment).
+// test can assert TLS framing and Write calls, NOT TCP segment boundaries.
 type captureConn struct {
 	net.Conn
 	buf    bytes.Buffer
@@ -23,7 +23,7 @@ func (c *captureConn) Write(b []byte) (int, error) {
 }
 
 // TestMirageShape locks in the shape measured to defeat Iran's SNI-DPI:
-// exactly two TLS records written in a single TCP segment, where the first
+// exactly two TLS records written separately, where the first
 // record ends before the SNI and the second still contains it intact.
 func TestMirageShape(t *testing.T) {
 	t.Parallel()

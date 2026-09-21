@@ -187,6 +187,16 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
 func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
+		expected := 0
+		if raw := query.Get("expected"); raw != "" {
+			var err error
+			expected, err = strconv.Atoi(raw)
+			if err != nil || expected < 100 || expected > 599 {
+				render.Status(r, http.StatusBadRequest)
+				render.JSON(w, r, ErrBadRequest)
+				return
+			}
+		}
 		url := query.Get("url")
 		if strings.HasPrefix(url, "http://") {
 			url = ""
@@ -199,10 +209,10 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 		}
 
 		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(timeout))
+		ctx, cancel := context.WithTimeout(r.Context(), time.Millisecond*time.Duration(timeout))
 		defer cancel()
 
-		delay, err := urltest.URLTest(ctx, url, proxy)
+		delay, err := urltest.URLTestExpected(ctx, url, proxy, expected)
 		defer func() {
 			realTag := group.RealTag(proxy)
 			if err != nil {

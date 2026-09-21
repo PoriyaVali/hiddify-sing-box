@@ -99,6 +99,19 @@ func (s *HistoryStorage) Close() error {
 }
 
 func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
+	return URLTestExpected(ctx, link, detour, 0)
+}
+
+// URLTestExpected preserves legacy reachability semantics when expected is zero.
+// A requested status is enforced on THIS call, not inferred from shared history.
+// It still measures connection latency, not Mirage shape or useful throughput.
+func URLTestExpected(ctx context.Context, link string, detour N.Dialer, expected int) (t uint16, err error) {
+	if expected != 0 && (expected < 100 || expected > 599) {
+		return 0, fmt.Errorf("invalid expected HTTP status")
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
 	if detour == nil {
 		err = fmt.Errorf("urltest dialer is nil")
 		return
@@ -136,6 +149,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	}
 	select {
 	case <-ctx.Done():
+		err = ctx.Err()
 		return
 	default:
 	}
@@ -157,6 +171,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	defer client.CloseIdleConnections()
 	select {
 	case <-ctx.Done():
+		err = ctx.Err()
 		return
 	default:
 	}
@@ -165,21 +180,28 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 		return
 	}
 	resp.Body.Close()
+	if expected != 0 && resp.StatusCode != expected {
+		return 0, fmt.Errorf("unexpected HTTP status: got %d, want %d", resp.StatusCode, expected)
+	}
 
 	t = uint16(time.Since(start) / time.Millisecond)
 
 	if IsUnifiedDelayFromContext(ctx) {
 		select {
 		case <-ctx.Done():
+			err = ctx.Err()
 			return
 		default:
 		}
 		second := time.Now()
-		resp, err = client.Do(req)
+		resp, err = client.Do(req.WithContext(ctx))
 		if err != nil {
 			return
 		}
 		resp.Body.Close()
+		if expected != 0 && resp.StatusCode != expected {
+			return 0, fmt.Errorf("unexpected HTTP status: got %d, want %d", resp.StatusCode, expected)
+		}
 		t = uint16(time.Since(second) / time.Millisecond) //to avid timeout in the second call
 	}
 	return

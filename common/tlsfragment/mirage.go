@@ -1,8 +1,8 @@
 package tf
 
 import (
-	"encoding/binary"
 	"net"
+	"sync"
 )
 
 // Mirage — Doctor Mobile's TLS-record fragmentation.
@@ -75,10 +75,14 @@ const (
 // to be steerable from the panel rather than settled here.
 type MirageConn struct {
 	net.Conn
-	offset       int
-	records      int
-	coalesce     bool
-	firstWritten bool
+	offset         int
+	records        int
+	coalesce       bool
+	firstWritten   bool
+	writeMu        sync.Mutex
+	writeErr       error
+	appliedOffset  int
+	appliedRecords int
 }
 
 // NewMirageConn wraps conn. A records count of 0 or 1 means the measured
@@ -95,90 +99,41 @@ func NewMirageConn(conn net.Conn, offset, records int, coalesce bool) *MirageCon
 }
 
 func (c *MirageConn) Write(b []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
 	if c.firstWritten {
 		return c.Conn.Write(b)
 	}
 	c.firstWritten = true
 
-	split := c.splitPoint(b)
-	if split <= 0 {
+	parts, fragments, ok := mirageParts(b, c.offset, c.records)
+	if !ok {
 		// Not a ClientHello we can split safely — send untouched.
 		return c.Conn.Write(b)
 	}
 
-	handshake := b[recordHeaderLen:]
-	parts := [][]byte{
-		appendRecord(nil, b[:3], handshake[:split]),
-		appendRecord(nil, b[:3], handshake[split:]),
+	n, err := writeMirage(c.Conn, parts, fragments, c.coalesce)
+	c.writeErr = err
+	if err == nil {
+		c.appliedOffset = len(parts[0]) - recordHeaderLen
+		c.appliedRecords = fragments
 	}
-	// Extra records are carved out of the tail, AFTER the server name: a cut
-	// inside the name is the one shape measured to be dropped even for a
-	// hostname that is otherwise allowed.
-	for len(parts) < c.records {
-		tail := parts[len(parts)-1]
-		body := tail[recordHeaderLen:]
-		if len(body) < 2 {
-			break
-		}
-		at := len(body) / 2
-		parts = parts[:len(parts)-1]
-		parts = append(parts,
-			appendRecord(nil, tail[:3], body[:at]),
-			appendRecord(nil, tail[:3], body[at:]))
-	}
-
-	// One write per record. See the type comment: concatenating them is the
-	// form this censor drops. The panel can ask for the old shape back.
-	if c.coalesce {
-		var all []byte
-		for _, r := range parts {
-			all = append(all, r...)
-		}
-		if _, err := c.Conn.Write(all); err != nil {
-			return 0, err
-		}
-		return len(b), nil
-	}
-	for _, r := range parts {
-		if _, err := c.Conn.Write(r); err != nil {
-			return 0, err
-		}
-	}
-	return len(b), nil
+	return n, err
 }
 
-// splitPoint returns how many bytes of the handshake message belong in the
-// first record, or 0 when the buffer is not a splittable ClientHello.
-func (c *MirageConn) splitPoint(b []byte) int {
-	if len(b) <= recordHeaderLen+c.offset {
-		return 0
-	}
-	if b[0] != 0x16 { // not a handshake record
-		return 0
-	}
-	// Only fragment when there is actually a server name to hide, and make
-	// sure we cut before it — a cut inside the SNI is the shape that fails.
-	serverName := IndexTLSServerName(b)
-	if serverName == nil {
-		return 0
-	}
-	sniStart := serverName.Index - recordHeaderLen
-	split := c.offset
-	if split >= sniStart {
-		split = sniStart / 2
-	}
-	if split <= 0 {
-		return 0
-	}
-	return split
-}
-
-// appendRecord writes one TLS record: the original 3-byte header prefix
-// (content type + legacy version), the payload length, then the payload.
-func appendRecord(dst []byte, headerPrefix []byte, payload []byte) []byte {
-	dst = append(dst, headerPrefix...)
-	dst = binary.BigEndian.AppendUint16(dst, uint16(len(payload)))
-	return append(dst, payload...)
+// AppliedShape reports what this connection really emitted, not merely the
+// requested settings. Unsupported/partial hellos and failed writes report false.
+// A future probe driver must check this before crediting a strategy with success.
+func (c *MirageConn) AppliedShape() (offset, records int, coalesce, ok bool) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.appliedOffset, c.appliedRecords, c.coalesce, c.appliedRecords >= 2 && c.writeErr == nil
 }
 
 func (c *MirageConn) ReaderReplaceable() bool {
@@ -186,7 +141,9 @@ func (c *MirageConn) ReaderReplaceable() bool {
 }
 
 func (c *MirageConn) WriterReplaceable() bool {
-	return c.firstWritten
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.firstWritten && c.writeErr == nil
 }
 
 func (c *MirageConn) Upstream() any {
