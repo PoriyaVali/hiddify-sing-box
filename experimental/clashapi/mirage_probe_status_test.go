@@ -33,6 +33,14 @@ type testRoots struct {
 
 func (r testRoots) Pool() *x509.CertPool { return r.pool }
 
+// getProxyDelay walks the outbound manager to refresh URLTest groups
+// containing the probed outbound; this fixture has none.
+type emptyOutboundManager struct {
+	adapter.OutboundManager
+}
+
+func (emptyOutboundManager) Outbounds() []adapter.Outbound { return nil }
+
 // Real handler, real local TLS and HTTP, no real proxy, carrier or public request.
 func TestProxyDelayHonoursExpectedStatus(t *testing.T) {
 	for _, status := range []int{204, 302, 403, 500} {
@@ -48,7 +56,7 @@ func TestProxyDelayHonoursExpectedStatus(t *testing.T) {
 			ctx = context.WithValue(ctx, CtxKeyProxy, &localProbeOutbound{address: endpoint.Listener.Addr().String()})
 			req := httptest.NewRequest(http.MethodGet, "/delay?timeout=3000&expected=204&url="+url.QueryEscape(endpoint.URL), nil).WithContext(ctx)
 			rec := httptest.NewRecorder()
-			getProxyDelay(&Server{urlTestHistory: urltest.NewHistoryStorage()})(rec, req)
+			getProxyDelay(&Server{outbound: emptyOutboundManager{}, urlTestHistory: urltest.NewHistoryStorage()})(rec, req)
 			want := http.StatusServiceUnavailable
 			if status == 204 {
 				want = http.StatusOK
