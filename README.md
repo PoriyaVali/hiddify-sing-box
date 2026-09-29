@@ -1,21 +1,62 @@
-# sing-box-extended
+# hiddify-sing-box — Doctor Mobile core
 
-Sing-box with extended features.
+The sing-box core of the Doctor Mobile apps. It is derived from hiddify's fork
+and follows upstream [sing-box](https://github.com/SagerNet/sing-box).
 
-## Features
+- **Current base:** sing-box **1.13.21**.
+- **Branch:** `doctormobile/bump-v1.13.15`. `main` follows it.
+- **Android, iOS and desktop apps** use this core through
+  [hiddify-core](https://github.com/PoriyaVali/hiddify-core) (libcore), which
+  pins a commit of this repository.
+- **Routers and command-line use** take the `sing-box` binaries from
+  [Releases](https://github.com/PoriyaVali/hiddify-sing-box/releases). A
+  `cli-*` tag builds them for:
+  - Windows: amd64, arm64
+  - Linux: amd64, arm64, armv7, mips and mipsle (softfloat)
 
-* Amnezia 1.5
-* WARP
-* Tunneling
-* Mieru
-* XHTTP
-* SDNS (DNSCrypt)
-* Extended Wireguard options
-* Unified delay
+## What's new in cli-v1.13.21-dm (2026-09-29)
 
-## Examples
+Updated from sing-box 1.13.15 to the fixes in 1.13.21 (#1).
 
-https://github.com/shtorm-7/sing-box-extended/tree/extended/examples
+- **AnyTLS:** the client no longer sends its software name and version to the
+  server. A new `client_metadata` option sets a value if one is needed.
+  AnyTLS URLTest results are fixed.
+- **URLTest and delay tests:** an outbound that never answers now reports
+  "Timeout" when the requested timeout runs out. It used to hang for 30 s or
+  more, and URLTest groups stalled on it.
+- **WebSocket:** early data works with smux and yamux multiplexing. A failed
+  handshake no longer panics.
+- **Rule sets:** malformed `.srs`, geosite or profile data now gives an error
+  instead of a panic or unbounded memory use.
+- **cache.db:** a corrupted cache no longer crashes the core, at start or while
+  running. It starts with an empty cache.
+- **DNS:** address matching for inverted rules and DHCP DNS search domains are
+  fixed.
+- **Routing and TUN:** these are fixed:
+  - loopback protection and a routing loop on darwin;
+  - duplicated `route_address_set` IP sets;
+  - FakeIP metadata saving;
+  - network reset;
+  - log output before start;
+  - slow-open connections.
+- **Dependencies:**
+  - sing 0.8.14;
+  - sing-quic 0.6.5;
+  - sing-tun 0.8.15, which fixes gVisor keepalive traffic, the default
+    interface monitor on boot, TCP NAT port reuse, system-stack panics and
+    the `su` lookup for Android auto_redirect.
+
+## Doctor Mobile changes on top of sing-box
+
+- **Mirage:** TLS-record fragmentation shaped to get past SNI-based DPI,
+  REALITY included.
+- **TLS handshake timeout:** 60 s, for slow and lossy networks.
+- **Kept from hiddify:**
+  - WARP
+  - the xray outbound, which provides XHTTP and others
+  - extended WireGuard options
+  - unified delay
+- **Removed:** dnstt, mieru, psiphon and tunnel. The apps do not use them.
 
 ## License
 
