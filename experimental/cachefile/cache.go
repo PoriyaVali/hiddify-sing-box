@@ -110,6 +110,22 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateInitialize {
 		return nil
 	}
+	db, err := c.open()
+	if errors.Is(err, errCorruptedDatabase) {
+		// The file opened but reading its pages panicked; start with an empty cache.
+		_ = os.Remove(c.path)
+		db, err = c.open()
+	}
+	if err != nil {
+		return err
+	}
+	c.DB = db
+	return nil
+}
+
+var errCorruptedDatabase = E.New("database corrupted")
+
+func (c *CacheFile) open() (*bbolt.DB, error) {
 	const fileMode = 0o666
 	options := bbolt.Options{Timeout: time.Second}
 	var (
@@ -117,7 +133,7 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 		err error
 	)
 	for range 10 {
-		db, err = bbolt.Open(c.path, fileMode, &options)
+		db, err = openDB(c.path, fileMode, &options)
 		if err == nil {
 			break
 		}
@@ -127,20 +143,48 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 		if E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
 			rmErr := os.Remove(c.path)
 			if rmErr != nil {
-				return err
+				return nil, err
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = filemanager.Chown(c.ctx, c.path)
 	if err != nil {
 		db.Close()
-		return E.Cause(err, "platform chown")
+		return nil, E.Cause(err, "platform chown")
 	}
-	err = db.Batch(func(tx *bbolt.Tx) error {
+	err = removeUnknownBuckets(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// openDB reports a panic inside bbolt.Open, such as a corrupted freelist
+// page, as an invalid database so that open removes the file and retries.
+func openDB(path string, mode os.FileMode, options *bbolt.Options) (db *bbolt.DB, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			db = nil
+			err = E.Cause(bboltErrors.ErrInvalid, "open database: ", r)
+		}
+	}()
+	return bbolt.Open(path, mode, options)
+}
+
+// removeUnknownBuckets runs in the caller's goroutine (Update, not Batch)
+// so a panic on corrupted pages can be recovered here.
+func removeUnknownBuckets(db *bbolt.DB) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = E.Cause(errCorruptedDatabase, r)
+		}
+	}()
+	return db.Update(func(tx *bbolt.Tx) error {
 		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
 			if name[0] == 0 {
 				return b.ForEachBucket(func(k []byte) error {
@@ -159,12 +203,6 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 			return nil
 		})
 	})
-	if err != nil {
-		db.Close()
-		return err
-	}
-	c.DB = db
-	return nil
 }
 
 func (c *CacheFile) Close() error {
