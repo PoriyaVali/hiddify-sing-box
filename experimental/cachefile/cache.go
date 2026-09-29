@@ -38,21 +38,24 @@ var (
 var _ adapter.CacheFile = (*CacheFile)(nil)
 
 type CacheFile struct {
-	ctx               context.Context
-	path              string
-	cacheID           []byte
-	storeFakeIP       bool
-	storeRDRC         bool
-	storeWARPConfig   bool
-	rdrcTimeout       time.Duration
-	DB                *bbolt.DB
-	saveMetadataTimer *time.Timer
-	saveFakeIPAccess  sync.RWMutex
-	saveDomain        map[netip.Addr]string
-	saveAddress4      map[string]netip.Addr
-	saveAddress6      map[string]netip.Addr
-	saveRDRCAccess    sync.RWMutex
-	saveRDRC          map[saveRDRCCacheKey]bool
+	ctx                context.Context
+	path               string
+	cacheID            []byte
+	storeFakeIP        bool
+	storeRDRC          bool
+	storeWARPConfig    bool
+	rdrcTimeout        time.Duration
+	DB                 *bbolt.DB
+	resetAccess        sync.Mutex
+	saveMetadataAccess sync.Mutex
+	saveMetadata       *adapter.FakeIPMetadata
+	saveMetadataTimer  *time.Timer
+	saveFakeIPAccess   sync.RWMutex
+	saveDomain         map[netip.Addr]string
+	saveAddress4       map[string]netip.Addr
+	saveAddress6       map[string]netip.Addr
+	saveRDRCAccess     sync.RWMutex
+	saveRDRC           map[saveRDRCCacheKey]bool
 }
 
 type saveRDRCCacheKey struct {
@@ -107,6 +110,22 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateInitialize {
 		return nil
 	}
+	db, err := c.open()
+	if errors.Is(err, errCorruptedDatabase) {
+		// The file opened but reading its pages panicked; start with an empty cache.
+		_ = os.Remove(c.path)
+		db, err = c.open()
+	}
+	if err != nil {
+		return err
+	}
+	c.DB = db
+	return nil
+}
+
+var errCorruptedDatabase = E.New("database corrupted")
+
+func (c *CacheFile) open() (*bbolt.DB, error) {
 	const fileMode = 0o666
 	options := bbolt.Options{Timeout: time.Second}
 	var (
@@ -114,7 +133,7 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 		err error
 	)
 	for range 10 {
-		db, err = bbolt.Open(c.path, fileMode, &options)
+		db, err = openDB(c.path, fileMode, &options)
 		if err == nil {
 			break
 		}
@@ -124,20 +143,48 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 		if E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
 			rmErr := os.Remove(c.path)
 			if rmErr != nil {
-				return err
+				return nil, err
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = filemanager.Chown(c.ctx, c.path)
 	if err != nil {
 		db.Close()
-		return E.Cause(err, "platform chown")
+		return nil, E.Cause(err, "platform chown")
 	}
-	err = db.Batch(func(tx *bbolt.Tx) error {
+	err = removeUnknownBuckets(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// openDB reports a panic inside bbolt.Open, such as a corrupted freelist
+// page, as an invalid database so that open removes the file and retries.
+func openDB(path string, mode os.FileMode, options *bbolt.Options) (db *bbolt.DB, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			db = nil
+			err = E.Cause(bboltErrors.ErrInvalid, "open database: ", r)
+		}
+	}()
+	return bbolt.Open(path, mode, options)
+}
+
+// removeUnknownBuckets runs in the caller's goroutine (Update, not Batch)
+// so a panic on corrupted pages can be recovered here.
+func removeUnknownBuckets(db *bbolt.DB) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = E.Cause(errCorruptedDatabase, r)
+		}
+	}()
+	return db.Update(func(tx *bbolt.Tx) error {
 		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
 			if name[0] == 0 {
 				return b.ForEachBucket(func(k []byte) error {
@@ -156,12 +203,6 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 			return nil
 		})
 	})
-	if err != nil {
-		db.Close()
-		return err
-	}
-	c.DB = db
-	return nil
 }
 
 func (c *CacheFile) Close() error {
@@ -171,13 +212,55 @@ func (c *CacheFile) Close() error {
 	return c.DB.Close()
 }
 
+func (c *CacheFile) view(fn func(tx *bbolt.Tx) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.resetDB()
+			err = E.New("database corrupted: ", r)
+		}
+	}()
+	return c.DB.View(fn)
+}
+
+func (c *CacheFile) batch(fn func(tx *bbolt.Tx) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.resetDB()
+			err = E.New("database corrupted: ", r)
+		}
+	}()
+	return c.DB.Batch(fn)
+}
+
+func (c *CacheFile) update(fn func(tx *bbolt.Tx) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.resetDB()
+			err = E.New("database corrupted: ", r)
+		}
+	}()
+	return c.DB.Update(fn)
+}
+
+func (c *CacheFile) resetDB() {
+	c.resetAccess.Lock()
+	defer c.resetAccess.Unlock()
+	c.DB.Close()
+	os.Remove(c.path)
+	db, err := bbolt.Open(c.path, 0o666, &bbolt.Options{Timeout: time.Second})
+	if err == nil {
+		_ = filemanager.Chown(c.ctx, c.path)
+		c.DB = db
+	}
+}
+
 func (c *CacheFile) StoreFakeIP() bool {
 	return c.storeFakeIP
 }
 
 func (c *CacheFile) LoadMode() string {
 	var mode string
-	c.DB.View(func(t *bbolt.Tx) error {
+	c.view(func(t *bbolt.Tx) error {
 		bucket := t.Bucket(bucketMode)
 		if bucket == nil {
 			return nil
@@ -195,7 +278,7 @@ func (c *CacheFile) LoadMode() string {
 }
 
 func (c *CacheFile) StoreMode(mode string) error {
-	return c.DB.Batch(func(t *bbolt.Tx) error {
+	return c.batch(func(t *bbolt.Tx) error {
 		bucket, err := t.CreateBucketIfNotExists(bucketMode)
 		if err != nil {
 			return err
@@ -232,7 +315,7 @@ func (c *CacheFile) createBucket(t *bbolt.Tx, key []byte) (*bbolt.Bucket, error)
 
 func (c *CacheFile) LoadSelected(group string) string {
 	var selected string
-	c.DB.View(func(t *bbolt.Tx) error {
+	c.view(func(t *bbolt.Tx) error {
 		bucket := c.bucket(t, bucketSelected)
 		if bucket == nil {
 			return nil
@@ -247,7 +330,7 @@ func (c *CacheFile) LoadSelected(group string) string {
 }
 
 func (c *CacheFile) StoreSelected(group, selected string) error {
-	return c.DB.Batch(func(t *bbolt.Tx) error {
+	return c.batch(func(t *bbolt.Tx) error {
 		bucket, err := c.createBucket(t, bucketSelected)
 		if err != nil {
 			return err
@@ -257,7 +340,7 @@ func (c *CacheFile) StoreSelected(group, selected string) error {
 }
 
 func (c *CacheFile) LoadGroupExpand(group string) (isExpand bool, loaded bool) {
-	c.DB.View(func(t *bbolt.Tx) error {
+	c.view(func(t *bbolt.Tx) error {
 		bucket := c.bucket(t, bucketExpand)
 		if bucket == nil {
 			return nil
@@ -273,7 +356,7 @@ func (c *CacheFile) LoadGroupExpand(group string) (isExpand bool, loaded bool) {
 }
 
 func (c *CacheFile) StoreGroupExpand(group string, isExpand bool) error {
-	return c.DB.Batch(func(t *bbolt.Tx) error {
+	return c.batch(func(t *bbolt.Tx) error {
 		bucket, err := c.createBucket(t, bucketExpand)
 		if err != nil {
 			return err
@@ -288,7 +371,7 @@ func (c *CacheFile) StoreGroupExpand(group string, isExpand bool) error {
 
 func (c *CacheFile) LoadRuleSet(tag string) *adapter.SavedBinary {
 	var savedSet adapter.SavedBinary
-	err := c.DB.View(func(t *bbolt.Tx) error {
+	err := c.view(func(t *bbolt.Tx) error {
 		bucket := c.bucket(t, bucketRuleSet)
 		if bucket == nil {
 			return os.ErrNotExist
@@ -306,7 +389,7 @@ func (c *CacheFile) LoadRuleSet(tag string) *adapter.SavedBinary {
 }
 
 func (c *CacheFile) SaveRuleSet(tag string, set *adapter.SavedBinary) error {
-	return c.DB.Batch(func(t *bbolt.Tx) error {
+	return c.batch(func(t *bbolt.Tx) error {
 		bucket, err := c.createBucket(t, bucketRuleSet)
 		if err != nil {
 			return err
@@ -325,7 +408,7 @@ func (c *CacheFile) StoreWARPConfig() bool {
 
 func (c *CacheFile) LoadBinary(tag string) *adapter.SavedBinary {
 	var savedConfig adapter.SavedBinary
-	err := c.DB.View(func(t *bbolt.Tx) error {
+	err := c.view(func(t *bbolt.Tx) error {
 		bucket := c.bucket(t, bucketRuleSet)
 		if bucket == nil {
 			return os.ErrNotExist
@@ -343,7 +426,7 @@ func (c *CacheFile) LoadBinary(tag string) *adapter.SavedBinary {
 }
 
 func (c *CacheFile) SaveBinary(tag string, set *adapter.SavedBinary) error {
-	return c.DB.Batch(func(t *bbolt.Tx) error {
+	return c.batch(func(t *bbolt.Tx) error {
 		bucket, err := c.createBucket(t, bucketRuleSet)
 		if err != nil {
 			return err
