@@ -69,7 +69,21 @@ Its API is v0.0.11's plus one optional `DisableReuse` field.
   since chunked writes make several writes under one lock.
   `TestControlFrameDoesNotLandBetweenChunks` checks that no frame lands inside
   the sequence.
-- The weak-link bench of 2026-10-15 measured the mihomo client with these fixes
-  at 94.4% success on a bad link (440 ms RTT, loss, 1-3 s outages), against
-  87.8% for sing-box with v0.0.11. This port has not been measured on that
-  bench yet.
+- The weak-link bench (a TUN link emulator, a V2bX 1.8.0 anytls server, and
+  the sing-box 1.13.0 client built with and without this directory) measured
+  this port on 2026-10-16. The phase that tells them apart is the requests
+  made right after 2 MB uploads cancelled at 2 s:
+  - Bad link (440 ms RTT, 384 kbit/s up, loss in bursts, a 1-3 s outage
+    every 25 s), 7 seeds: 196 of 210 succeeded (93.3%), against 183 (87.1%)
+    with v0.0.11. The mihomo client with the same fixes measured 94.4%.
+  - Counting a failure as never finishing, the fixed client was no slower at
+    any percentile on the 4 seeds with per-request times: median 6.1 s
+    against 7.6 s, 90th percentile 17.9 s against a failure (Mann-Whitney
+    p = 0.15). The median of the successful requests alone was higher (6.4 s
+    against 4.7 s), because the slow requests the old client failed now
+    complete.
+  - Weak link (300 ms RTT, 1% loss in bursts), 2 seeds: 58 of 60 against 57,
+    3 new sessions against 9, 90th percentile 5.9 s against 10.1 s.
+  - Browsing (840 requests) and downloads showed no difference beyond the
+    spread between runs. Bad-link downloads averaged 0.61 Mbit/s against
+    0.67, lower in 5 of 7 seeds; weak-link downloads were faster in both.
