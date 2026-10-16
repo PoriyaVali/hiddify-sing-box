@@ -21,6 +21,10 @@ import (
 type Session struct {
 	conn     net.Conn
 	connLock sync.Mutex
+	// progress is when the holder of connLock took it or last handed a chunk
+	// to conn (monoNow): how a control frame waiting for the lock tells a
+	// slow write from a stalled one.
+	progress atomic.Int64
 
 	streams    map[uint32]*Stream
 	streamId   atomic.Uint32
@@ -32,6 +36,11 @@ type Session struct {
 
 	synDone     func()
 	synDoneLock sync.Mutex
+	// synSentAt is when the latest SYN was sent (monoNow), and synRTT the
+	// client's estimate of how long acknowledgements take, which sets how
+	// long a reused session may take to acknowledge a new stream.
+	synSentAt atomic.Int64
+	synRTT    *synRTT
 
 	// pool
 	seq       uint64
@@ -145,12 +154,13 @@ func (s *Session) OpenStream() (*Stream, error) {
 		if s.synDone != nil {
 			s.synDone()
 		}
-		s.synDone = util.NewDeadlineWatcher(time.Second*3, func() {
+		s.synDone = util.NewDeadlineWatcher(s.synRTT.timeout(), func() {
 			s.Close()
 		})
 		s.synDoneLock.Unlock()
 	}
 
+	s.synSentAt.Store(monoNow())
 	if _, err := s.writeControlFrame(newFrame(cmdSYN, sid)); err != nil {
 		return nil, err
 	}
@@ -224,6 +234,9 @@ func (s *Session) recvLoop() error {
 				}
 				s.streamLock.Unlock()
 			case cmdSYNACK: // should be client only
+				if sent := s.synSentAt.Swap(0); sent != 0 {
+					s.synRTT.observe(time.Duration(monoNow() - sent))
+				}
 				s.synDoneLock.Lock()
 				if s.synDone != nil {
 					s.synDone()
@@ -428,23 +441,129 @@ func (s *Session) writeControlFrame(frame frame) (int, error) {
 	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
 	buffer.Write(frame.data)
 
-	s.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
-
-	_, err := s.writeConn(buffer.Bytes())
+	_, err := s.writeConnWithin(buffer.Bytes(), controlFrameWriteTimeout)
 	buffer.Release()
 	if err != nil {
 		s.Close()
 		return 0, err
 	}
 
-	s.conn.SetWriteDeadline(time.Time{})
-
 	return dataLen, nil
 }
 
+// controlFrameWriteTimeout bounds how long one control frame may wait for the
+// connection, and then how long it may take to leave. A peer that stops
+// reading must not hold the session forever, but a throttled link drains
+// slowly and a timed-out TLS write corrupts the session, so this is generous.
+//
+// It used to be five seconds, set on the whole connection before waiting for
+// the write lock: the clock ran while a data frame - an upload - was still
+// draining, that frame inherited the deadline and failed, and the control
+// frame, a FIN from a stream being closed, then closed the session over
+// nothing but a slow link instead of returning it to the pool.
+const controlFrameWriteTimeout = 30 * time.Second
+
 func (s *Session) writeConn(b []byte) (n int, err error) {
+	return s.writeConnWithin(b, 0)
+}
+
+// lockConnWithin takes connLock for a control frame. Waiting is normal: a data
+// write ahead of it may still be draining over a slow link, however long that
+// takes, and data writes carry no deadline so that such a link is never cut.
+// But a holder that has handed nothing to the connection for timeout means the
+// peer stopped reading or the path is gone, and nothing else would interrupt
+// it until the operating system gives up on the connection. The session is
+// closed then: that write fails and frees the lock, and this frame's own write
+// fails in turn, so whoever closes a stream gets an answer instead of hanging
+// with the session.
+//
+// Elapsed time alone does not say a write is stuck: a large one over a weak
+// link can hold the lock for minutes while every chunk keeps leaving.
+func (s *Session) lockConnWithin(timeout time.Duration) {
+	if s.connLock.TryLock() {
+		return
+	}
+	acquired := make(chan struct{})
+	go func() {
+		wait := time.NewTimer(timeout)
+		defer wait.Stop()
+		for {
+			select {
+			case <-acquired:
+				return
+			case <-wait.C:
+			}
+			idle := time.Duration(monoNow() - s.progress.Load())
+			if idle >= timeout {
+				s.Close()
+				return
+			}
+			wait.Reset(timeout - idle)
+		}
+	}()
 	s.connLock.Lock()
+	close(acquired)
+}
+
+// writeChunk is how much of a write goes to the connection at a time, with the
+// session's progress noted after each: one TLS record's worth. No write leaves
+// in a larger piece, so the slowest link a waiting control frame still tells
+// from a dead one moves a chunk per controlFrameWriteTimeout - about half a
+// KiB a second, slower than any connection can be used at.
+const writeChunk = 16 << 10
+
+// writeRecord writes one padded record to the connection and notes the
+// progress. A record no larger than a chunk goes in one write, as the padding
+// scheme sized it; a larger one goes a chunk at a time like any other write,
+// so that it shows progress while it drains - TLS cuts it into records of at
+// most that size anyway. The caller holds connLock.
+func (s *Session) writeRecord(b []byte) (int, error) {
+	if len(b) > writeChunk {
+		return s.writeInChunks(b)
+	}
+	n, err := s.conn.Write(b)
+	if err == nil {
+		s.progress.Store(monoNow())
+	}
+	return n, err
+}
+
+// writeInChunks writes b to the connection a chunk at a time, noting progress
+// after each one leaves. The caller holds connLock.
+func (s *Session) writeInChunks(b []byte) (n int, err error) {
+	for len(b) > 0 {
+		chunk := b
+		if len(chunk) > writeChunk {
+			chunk = chunk[:writeChunk]
+		}
+		var m int
+		m, err = s.conn.Write(chunk)
+		n += m
+		if err != nil {
+			return n, err
+		}
+		s.progress.Store(monoNow())
+		b = b[len(chunk):]
+	}
+	return n, nil
+}
+
+// writeConnWithin is writeConn for a control frame, bounded by timeout when it
+// is not zero: in waiting for the connection, and in the write itself, whose
+// deadline is cleared after it.
+func (s *Session) writeConnWithin(b []byte, timeout time.Duration) (n int, err error) {
+	if timeout > 0 {
+		s.lockConnWithin(timeout)
+	} else {
+		s.connLock.Lock()
+	}
 	defer s.connLock.Unlock()
+	s.progress.Store(monoNow())
+
+	if timeout > 0 && !s.buffering {
+		s.conn.SetWriteDeadline(time.Now().Add(timeout))
+		defer s.conn.SetWriteDeadline(time.Time{})
+	}
 
 	if s.buffering {
 		s.buffer = slices.Concat(s.buffer, b)
@@ -470,7 +589,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 					}
 				}
 				if remainPayloadLen > l { // this packet is all payload
-					_, err = s.conn.Write(b[:l])
+					_, err = s.writeRecord(b[:l])
 					if err != nil {
 						return 0, err
 					}
@@ -485,7 +604,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
 						b = slices.Concat(b, padding)
 					}
-					_, err = s.conn.Write(b)
+					_, err = s.writeRecord(b)
 					if err != nil {
 						return 0, err
 					}
@@ -496,7 +615,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 					padding[0] = cmdWaste
 					binary.BigEndian.PutUint32(padding[1:5], 0)
 					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
-					_, err = s.conn.Write(padding)
+					_, err = s.writeRecord(padding)
 					if err != nil {
 						return 0, err
 					}
@@ -507,7 +626,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 			if len(b) == 0 {
 				return
 			} else {
-				n2, err := s.conn.Write(b)
+				n2, err := s.writeInChunks(b)
 				return n + n2, err
 			}
 		} else {
@@ -515,5 +634,5 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 		}
 	}
 
-	return s.conn.Write(b)
+	return s.writeInChunks(b)
 }

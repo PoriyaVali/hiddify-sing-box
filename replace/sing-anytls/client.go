@@ -63,6 +63,7 @@ func (c *Client) createOutboundConnection(ctx context.Context) (net.Conn, error)
 	if err != nil {
 		return nil, err
 	}
+	limitUnsent(conn)
 
 	b := buf.NewPacket()
 	defer b.Release()

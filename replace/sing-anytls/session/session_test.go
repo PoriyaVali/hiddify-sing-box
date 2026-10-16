@@ -80,6 +80,10 @@ func TestStreamWriteOver64KiB(t *testing.T) {
 	}
 }
 
+// Writes leave in chunks of at most writeChunk, each noting the session's
+// progress (writeInChunks), so a split frame sequence is no longer one Write
+// on the connection. It is still one writeConn under connLock, which is what
+// keeps it contiguous; TestControlFrameDoesNotLandBetweenChunks checks that.
 func TestWriteDataFrameWritesSplitFramesContiguously(t *testing.T) {
 	conn := &recordingConn{}
 	sess := &Session{conn: conn}
@@ -92,17 +96,77 @@ func TestWriteDataFrameWritesSplitFramesContiguously(t *testing.T) {
 	if written != len(payload) {
 		t.Fatalf("writeDataFrame returned %d, want %d", written, len(payload))
 	}
-	if len(conn.writes) != 1 {
-		t.Fatalf("underlying conn got %d writes, want 1", len(conn.writes))
+	for i, w := range conn.writes {
+		if len(w) > writeChunk {
+			t.Fatalf("write %d is %d bytes, more than a chunk", i, len(w))
+		}
 	}
 
-	got := conn.writes[0]
+	got := bytes.Join(conn.writes, nil)
 	wantLen := len(payload) + 2*headerOverHeadSize
 	if len(got) != wantLen {
 		t.Fatalf("underlying write length = %d, want %d", len(got), wantLen)
 	}
 	if got[0] != cmdPSH || got[headerOverHeadSize+maxFrameDataLen] != cmdPSH {
 		t.Fatal("split data frames were not serialized contiguously")
+	}
+}
+
+// pacedRecordingConn records each write after a pause, signalling the first,
+// and has no deadline to set.
+type pacedRecordingConn struct {
+	net.Conn
+	started chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	writes  [][]byte
+}
+
+func (c *pacedRecordingConn) Write(b []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	time.Sleep(5 * time.Millisecond)
+	c.mu.Lock()
+	c.writes = append(c.writes, bytes.Clone(b))
+	c.mu.Unlock()
+	return len(b), nil
+}
+
+func (c *pacedRecordingConn) SetWriteDeadline(time.Time) error { return nil }
+
+// A control frame sent while a split frame sequence is leaving waits for all
+// of it: chunked writes hold connLock from the first chunk to the last.
+func TestControlFrameDoesNotLandBetweenChunks(t *testing.T) {
+	conn := &pacedRecordingConn{started: make(chan struct{})}
+	sess := &Session{conn: conn}
+
+	payload := make([]byte, 3*maxFrameDataLen)
+	dataErr := make(chan error, 1)
+	go func() {
+		_, err := sess.writeDataFrame(7, payload)
+		dataErr <- err
+	}()
+	<-conn.started // the data write holds the line
+	if _, err := sess.writeControlFrame(newFrame(cmdFIN, 9)); err != nil {
+		t.Fatalf("writeControlFrame: %v", err)
+	}
+	if err := <-dataErr; err != nil {
+		t.Fatalf("writeDataFrame: %v", err)
+	}
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	last := conn.writes[len(conn.writes)-1]
+	if len(last) != headerOverHeadSize || last[0] != cmdFIN {
+		t.Fatal("the control frame was not written after the whole data sequence")
+	}
+	data := bytes.Join(conn.writes[:len(conn.writes)-1], nil)
+	if want := len(payload) + 3*headerOverHeadSize; len(data) != want {
+		t.Fatalf("%d bytes before the control frame, want the %d of the data frames", len(data), want)
+	}
+	for off := 0; off < len(data); off += headerOverHeadSize + maxFrameDataLen {
+		if data[off] != cmdPSH {
+			t.Fatalf("byte %d is %d, want a PSH header: a frame landed inside the sequence", off, data[off])
+		}
 	}
 }
 
