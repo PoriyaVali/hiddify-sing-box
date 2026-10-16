@@ -44,10 +44,11 @@ Its API is v0.0.11's plus one optional `DisableReuse` field.
   - A session that closed is never pooled, or taken from the pool.
   - A request waiting on a handshake takes a session that joins the pool in
     the meantime.
-  - A handshake whose request gave up goes on, for up to 20 s, and its session
-    waits in the pool for the retry. While the request still waits, the dial
-    has no new deadline: sing-box gives a dial no deadline past the TCP
-    connect, and that is kept (`session/client.go`).
+  - A handshake its request no longer waits for - the request gave up, or
+    took a pooled session instead - goes on for up to 20 s, and its session
+    waits in the pool for the next request. While the request still waits,
+    the dial has no new deadline: sing-box gives a dial no deadline past the
+    TCP connect, and that is kept (`session/client.go`).
 - **TCP_NOTSENT_LOWAT** is set to 16 KiB on the session's socket, reached
   through the TLS conn's `NetConn` and the dialers' `Upstream`. The rest of a
   cancelled upload then waits in the session, which drops it, instead of in

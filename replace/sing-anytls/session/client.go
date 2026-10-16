@@ -167,7 +167,7 @@ func (c *Client) getIdleSession() (idle *Session) {
 }
 
 // abandonedDialTimeout bounds a new session's dial and handshake once the
-// request that started it has given up.
+// request that started it no longer waits for it.
 const abandonedDialTimeout = 20 * time.Second
 
 // createSession dials a new session for a request. While the request waits,
@@ -181,13 +181,17 @@ const abandonedDialTimeout = 20 * time.Second
 //
 // While it waits, the request also takes any session that joins the pool -
 // one freed by another stream, or a handshake an earlier request gave up on -
-// rather than wait for its own, which then joins the pool in turn.
+// rather than wait for its own, which then joins the pool in turn, within the
+// same bound. That bound starts when the request stops waiting, not when its
+// context ends: sing-box hands an outbound the connection's own context,
+// which lives as long as the connection does.
 func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	type dialed struct {
 		session *Session
 		err     error
 	}
 	done := make(chan dialed, 1)
+	unwaited := make(chan struct{}) // closed when the request stops waiting
 	go func() {
 		dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
@@ -200,7 +204,7 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 				return
 			case <-stop:
 				return
-			case <-ctx.Done():
+			case <-unwaited:
 			}
 			abandoned := time.NewTimer(c.abandonedDial)
 			defer abandoned.Stop()
@@ -216,6 +220,7 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 		done <- dialed{session, err}
 	}()
 	poolLater := func() {
+		close(unwaited)
 		go func() {
 			if d := <-done; d.session != nil {
 				c.keepIdle(d.session)

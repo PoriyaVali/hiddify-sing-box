@@ -175,6 +175,54 @@ func TestAbandonedHandshakeIsBounded(t *testing.T) {
 	}
 }
 
+// A request that takes a session from the pool stops waiting for its own
+// handshake as surely as one that gives up, and that handshake is bounded the
+// same way. Waiting for the request's context to end instead left a stalled
+// handshake, its goroutine and its socket alive for as long as the context:
+// sing-box hands an outbound the connection's own, which lives as long as the
+// connection (Codex review of hiddify-sing-box#2).
+func TestHandshakeLeftForAPooledSessionIsBounded(t *testing.T) {
+	var calls atomic.Int32
+	cancelled := make(chan struct{})
+	dial := func(ctx context.Context) (net.Conn, error) {
+		if calls.Add(1) == 1 {
+			// The first request's handshake lands after it gave up.
+			select {
+			case <-time.After(150 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			c, s := net.Pipe()
+			t.Cleanup(func() { c.Close(); s.Close() })
+			go io.Copy(io.Discard, s)
+			return c, nil
+		}
+		<-ctx.Done() // the second request's handshake never completes
+		close(cancelled)
+		return nil, ctx.Err()
+	}
+	c := newTestClient(dial, false)
+	c.abandonedDial = 400 * time.Millisecond
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	_, _ = c.CreateStream(ctx)
+	cancel()
+
+	// A request whose context never ends takes the first handshake's session
+	// from the pool, leaving its own handshake behind.
+	st, err := c.CreateStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a handshake no request waits for any more was never cancelled")
+	}
+}
+
 // A session that closed before it reached the pool - a handshake finishing
 // just as the peer drops the connection - must not be pooled after its close
 // hook ran: the next request would take it and fail instead of dialling.
