@@ -151,19 +151,37 @@ func (c *Client) keepIdle(session *Session) {
 
 // getIdleSession takes the newest idle session, passing over any that closed
 // while its close hook has yet to remove it.
-func (c *Client) getIdleSession() (idle *Session) {
+func (c *Client) getIdleSession() *Session {
 	c.idleSessionLock.Lock()
+	defer c.idleSessionLock.Unlock()
+	return c.takeIdleLocked()
+}
+
+// idleOrReady takes the newest idle session or, when there is none, returns
+// the channel closed when one joins the pool. One lock covers both: keepIdle
+// replaces the channel as it pools a session, so a request that looked at the
+// pool and then took the channel separately could miss a session pooled in
+// between, and wait out a handshake of its own beside it.
+func (c *Client) idleOrReady() (*Session, chan struct{}) {
+	c.idleSessionLock.Lock()
+	defer c.idleSessionLock.Unlock()
+	if session := c.takeIdleLocked(); session != nil {
+		return session, nil
+	}
+	return nil, c.idleReady
+}
+
+// takeIdleLocked is getIdleSession for a caller holding idleSessionLock.
+func (c *Client) takeIdleLocked() *Session {
 	for !c.idleSession.IsEmpty() {
 		it := c.idleSession.Iterate()
 		session := it.Value()
 		c.idleSession.Remove(it.Key())
 		if !session.IsClosed() {
-			idle = session
-			break
+			return session
 		}
 	}
-	c.idleSessionLock.Unlock()
-	return
+	return nil
 }
 
 // abandonedDialTimeout bounds a new session's dial and handshake once the
@@ -185,7 +203,20 @@ const abandonedDialTimeout = 20 * time.Second
 // same bound. That bound starts when the request stops waiting, not when its
 // context ends: sing-box hands an outbound the connection's own context,
 // which lives as long as the connection does.
+//
+// A request already gone when it gets here dials nothing: there is no
+// handshake under way to save.
 func (c *Client) createSession(ctx context.Context) (*Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var ready chan struct{} // nil, never ready, without a pool
+	if !c.disableReuse {
+		var idle *Session
+		if idle, ready = c.idleOrReady(); idle != nil {
+			return idle, nil
+		}
+	}
 	type dialed struct {
 		session *Session
 		err     error
@@ -193,6 +224,10 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	done := make(chan dialed, 1)
 	unwaited := make(chan struct{}) // closed when the request stops waiting
 	go func() {
+		if err := ctx.Err(); err != nil {
+			done <- dialed{nil, err} // gone before its dial began
+			return
+		}
 		dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 		stop := make(chan struct{})
@@ -228,32 +263,26 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 		}()
 	}
 	for {
-		var ready chan struct{} // nil, never ready, without a pool
-		if !c.disableReuse {
-			c.idleSessionLock.Lock()
-			ready = c.idleReady
-			c.idleSessionLock.Unlock()
-		}
 		select {
 		case d := <-done:
 			return d.session, d.err
 		case <-ready:
-			if session := c.getIdleSession(); session != nil {
+			var idle *Session
+			if idle, ready = c.idleOrReady(); idle != nil {
 				poolLater()
-				return session, nil
+				return idle, nil
 			}
-			continue // another request took it
+			// Another request took it; wait for the next.
 		case <-ctx.Done():
+			select {
+			case d := <-done: // made it as the request gave up
+				return d.session, d.err
+			default:
+			}
+			poolLater()
+			return nil, ctx.Err()
 		}
-		break
 	}
-	select {
-	case d := <-done: // made it as the request gave up
-		return d.session, d.err
-	default:
-	}
-	poolLater()
-	return nil, ctx.Err()
 }
 
 func (c *Client) dialSession(ctx context.Context) (*Session, error) {

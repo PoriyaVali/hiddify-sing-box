@@ -48,7 +48,9 @@ Its API is v0.0.11's plus one optional `DisableReuse` field.
 - **Pool:**
   - A session that closed is never pooled, or taken from the pool.
   - A request waiting on a handshake takes a session that joins the pool in
-    the meantime.
+    the meantime. The pool is checked under the same lock that hands out its
+    notification, so a session pooled just before the wait is not missed.
+  - A request already cancelled when it reaches the dial dials nothing.
   - A handshake its request no longer waits for - the request gave up, or
     took a pooled session instead - goes on for up to 20 s, and its session
     waits in the pool for the next request. While the request still waits,

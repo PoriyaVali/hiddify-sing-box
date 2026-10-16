@@ -275,3 +275,68 @@ func TestIdleSessionClosedInThePoolIsSkipped(t *testing.T) {
 		t.Fatal("a closed session was taken from the pool")
 	}
 }
+
+// A request already cancelled when it reaches the dial starts none. There is
+// no handshake under way to save, and one begun for nobody holds a socket
+// and a TLS handshake for up to abandonedDialTimeout, for every expired
+// request (Codex review of hiddify-sing-box#2).
+func TestCancelledRequestDialsNothing(t *testing.T) {
+	dial, dials := slowDial(t, 50*time.Millisecond)
+	c := newTestClient(dial, false)
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.CreateStream(ctx); err == nil {
+		t.Fatal("a cancelled request got a stream")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := dials.Load(); n != 0 {
+		t.Fatalf("dialled %d times for a request that was already cancelled", n)
+	}
+	if n := idleCount(c); n != 0 {
+		t.Fatalf("%d session(s) pooled that no request asked for", n)
+	}
+}
+
+// A session pooled after the request found the pool empty, but before it
+// began waiting for the pool, is taken at once. The pool's notification for
+// it had already fired, so the request waited out a handshake of its own
+// with a session sitting idle (Codex review of hiddify-sing-box#2).
+func TestSessionPooledBeforeTheWaitIsTaken(t *testing.T) {
+	fast, _ := slowDial(t, 0)
+	slow, _ := slowDial(t, 2*time.Second)
+	var calls atomic.Int32
+	c := newTestClient(func(ctx context.Context) (net.Conn, error) {
+		if calls.Add(1) == 1 {
+			return fast(ctx)
+		}
+		return slow(ctx)
+	}, false)
+	defer c.Close()
+
+	// CreateStream has found the pool empty; then a stream ends and its
+	// session joins the pool.
+	pooled, err := c.dialSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.keepIdle(pooled)
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := c.createSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Fatalf("the request waited %v with a session in the pool", took)
+	}
+	if got != pooled {
+		t.Fatal("the request did not get the pooled session")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("dialled %d times, want no handshake begun beside the pooled session", n)
+	}
+}
