@@ -177,3 +177,7 @@ replace github.com/sagernet/wireguard-go => ./replace/wireguard-go
 replace github.com/sagernet/sing-dns => github.com/shtorm-7/sing-dns v0.4.6-extended-1.0.0
 
 replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.0-extended-1.0.0
+
+// v0.0.13 with the weak-link fixes the app's mihomo client carries: see
+// replace/sing-anytls/README.dm.md.
+replace github.com/anytls/sing-anytls => ./replace/sing-anytls
