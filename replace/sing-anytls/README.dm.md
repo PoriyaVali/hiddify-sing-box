@@ -37,9 +37,14 @@ Its API is v0.0.11's plus one optional `DisableReuse` field.
 - **The SYNACK watchdog follows the link.** It was a fixed 3 s. It is now twice
   the client's observed acknowledgement time plus 1 s, kept within [3 s, 12 s].
   A live reused session is no longer closed, with the user's request, because
-  one SYNACK took longer than 3 s (`synrtt.go`).
+  one SYNACK took longer than 3 s (`synrtt.go`). Each SYNACK is timed against
+  its own stream's SYN: a late one for an earlier stream used to be timed
+  against the next stream's SYN, a sample far too short.
 - **The session clock is monotonic,** so a wall-clock correction neither
   stretches nor shrinks its timings (`clock.go`).
+- **The peer's protocol version is read atomically.** The receive loop wrote
+  it while OpenStream read it from other goroutines, an upstream data race
+  that `go test -race` reports once a test opens a second stream on a session.
 - **Pool:**
   - A session that closed is never pooled, or taken from the pool.
   - A request waiting on a handshake takes a session that joins the pool in

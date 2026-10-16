@@ -36,11 +36,11 @@ type Session struct {
 
 	synDone     func()
 	synDoneLock sync.Mutex
-	// synSentAt is when the latest SYN was sent (monoNow), and synRTT the
-	// client's estimate of how long acknowledgements take, which sets how
-	// long a reused session may take to acknowledge a new stream.
-	synSentAt atomic.Int64
-	synRTT    *synRTT
+	// synSent is the latest SYN, its stream and when it was sent (monoNow);
+	// synRTT the client's estimate of how long acknowledgements take, which
+	// sets how long a reused session may take to acknowledge a new stream.
+	synSent atomic.Pointer[sentSYN]
+	synRTT  *synRTT
 
 	// pool
 	seq       uint64
@@ -48,7 +48,9 @@ type Session struct {
 	padding   *atomic.TypedValue[*padding.PaddingFactory]
 	logger    logger.Logger
 
-	peerVersion byte
+	// Written by the receive loop when the peer's settings arrive, read by
+	// OpenStream and the stream handshake replies in other goroutines.
+	peerVersion atomic.Uint32
 
 	// client
 	isClient    bool
@@ -149,7 +151,7 @@ func (s *Session) OpenStream() (*Stream, error) {
 	sid := s.streamId.Add(1)
 	stream := newStream(sid, s)
 
-	if sid >= 2 && s.peerVersion >= 2 {
+	if sid >= 2 && s.peerVersion.Load() >= 2 {
 		s.synDoneLock.Lock()
 		if s.synDone != nil {
 			s.synDone()
@@ -160,7 +162,7 @@ func (s *Session) OpenStream() (*Stream, error) {
 		s.synDoneLock.Unlock()
 	}
 
-	s.synSentAt.Store(monoNow())
+	s.synSent.Store(&sentSYN{sid: sid, at: monoNow()})
 	if _, err := s.writeControlFrame(newFrame(cmdSYN, sid)); err != nil {
 		return nil, err
 	}
@@ -234,8 +236,12 @@ func (s *Session) recvLoop() error {
 				}
 				s.streamLock.Unlock()
 			case cmdSYNACK: // should be client only
-				if sent := s.synSentAt.Swap(0); sent != 0 {
-					s.synRTT.observe(time.Duration(monoNow() - sent))
+				// Timed against its own stream's SYN only. A late SYNACK for an
+				// earlier stream, after the next stream's SYN went out, would be
+				// timed against the newer SYN - too short a sample, and the
+				// newer stream's own SYNACK left with nothing to time.
+				if sent := s.synSent.Load(); sent != nil && sent.sid == sid && s.synSent.CompareAndSwap(sent, nil) {
+					s.synRTT.observe(time.Duration(monoNow() - sent.at))
 				}
 				s.synDoneLock.Lock()
 				if s.synDone != nil {
@@ -297,7 +303,7 @@ func (s *Session) recvLoop() error {
 						}
 						// check client's version
 						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
-							s.peerVersion = byte(v)
+							s.peerVersion.Store(uint32(byte(v)))
 							// send cmdServerSettings
 							f := newFrame(cmdServerSettings, 0)
 							f.data = util.StringMap{
@@ -358,7 +364,7 @@ func (s *Session) recvLoop() error {
 						// check server's version
 						m := util.StringMapFromBytes(buffer)
 						if v, err := strconv.Atoi(m["v"]); err == nil {
-							s.peerVersion = byte(v)
+							s.peerVersion.Store(uint32(byte(v)))
 						}
 					}
 					buf.Put(buffer)

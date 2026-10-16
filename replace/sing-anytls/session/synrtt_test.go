@@ -79,7 +79,7 @@ func openAndWait(t *testing.T, client *Session, est *synRTT) *Stream {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for est.est.Load() == before && client.synSentAt.Load() != 0 {
+	for est.est.Load() == before && client.synSent.Load() != nil {
 		if time.Now().After(deadline) {
 			t.Fatal("stream never acknowledged")
 		}
@@ -115,6 +115,46 @@ func TestReusedSessionSurvivesSlowAcknowledgement(t *testing.T) {
 	time.Sleep(4500 * time.Millisecond)
 	if client.IsClosed() {
 		t.Fatal("a live session was closed while its slow acknowledgement was on the way")
+	}
+}
+
+// An acknowledgement is timed against its own stream's SYN. A late SYNACK for
+// one stream, arriving after the session sent the next stream's SYN, was
+// timed against that newer SYN: a sample far too short, while the newer
+// stream's own acknowledgement found nothing left to time. The estimate fell,
+// and with it the allowance that keeps a live reused session from being
+// closed (Codex review of hiddify-sing-box#2).
+func TestAcknowledgementIsTimedAgainstItsOwnStream(t *testing.T) {
+	client, est := sessionPair(t, func(sid uint32) time.Duration {
+		if sid == 1 {
+			return 600 * time.Millisecond
+		}
+		return 2 * time.Second
+	})
+	first, err := client.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.Write([]byte{0}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	// Sent while the first stream's acknowledgement is still on its way.
+	second, err := client.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := second.Write([]byte{0}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Duration(est.est.Load()) < 1500*time.Millisecond {
+		if time.Now().After(deadline) {
+			t.Fatalf("estimate %v; the second stream's 2 s acknowledgement was never timed", time.Duration(est.est.Load()))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

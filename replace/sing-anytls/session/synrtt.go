@@ -24,6 +24,13 @@ const (
 // once, a faster one pulls the estimate down by a quarter of the gap, so a
 // few quick acknowledgements right after a stall do not shrink the allowance
 // before the link has settled.
+// sentSYN is a session's latest SYN: its stream, and when it was sent
+// (monoNow). Only that stream's SYNACK is timed against it.
+type sentSYN struct {
+	sid uint32
+	at  int64
+}
+
 type synRTT struct {
 	est atomic.Int64 // nanoseconds; 0 before the first sample
 }
