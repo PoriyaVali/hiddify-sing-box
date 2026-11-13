@@ -44,6 +44,7 @@ type DefaultDialer struct {
 	fallbackNetworkType    []C.InterfaceType
 	networkFallbackDelay   time.Duration
 	networkLastFallback    common.TypedValue[time.Time]
+	tlsFragment            *tlsFragmentConfig
 }
 
 func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDialer, error) {
@@ -212,6 +213,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		networkType:            networkType,
 		fallbackNetworkType:    fallbackNetworkType,
 		networkFallbackDelay:   networkFallbackDelay,
+		tlsFragment:            newTLSFragmentConfig(options.TLSFragment),
 	}, nil
 }
 
@@ -247,11 +249,17 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 					return d.udpDialer6.DialContext(ctx, network, address.String())
 				}
 			}
+			var conn net.Conn
+			var err error
 			if !address.IsIPv6() {
-				return DialSlowContext(&d.dialer4, ctx, network, address)
+				conn, err = DialSlowContext(&d.dialer4, ctx, network, address)
 			} else {
-				return DialSlowContext(&d.dialer6, ctx, network, address)
+				conn, err = DialSlowContext(&d.dialer6, ctx, network, address)
 			}
+			if err != nil {
+				return nil, err
+			}
+			return d.tlsFragment.wrap(conn), nil
 		}))
 	} else {
 		return d.DialParallelInterface(ctx, network, address, d.networkStrategy, d.networkType, d.fallbackNetworkType, d.networkFallbackDelay)
@@ -302,6 +310,9 @@ func (d *DefaultDialer) DialParallelInterface(ctx context.Context, network strin
 	}
 	if !fastFallback && !isPrimary {
 		d.networkLastFallback.Store(time.Now())
+	}
+	if N.NetworkName(network) == N.NetworkTCP {
+		conn = d.tlsFragment.wrap(conn)
 	}
 	return trackConn(conn, nil)
 }
