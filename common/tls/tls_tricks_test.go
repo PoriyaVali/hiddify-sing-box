@@ -116,3 +116,45 @@ func withServerName(options option.OutboundTLSOptions) option.OutboundTLSOptions
 	options.ServerName = "www.example.com"
 	return options
 }
+
+// mirage_auto picks the adaptive conn, for every client including REALITY's
+// uTLS base; without it the fixed-shape conn stays.
+func TestMirageAutoWrapsTheConnection(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		options option.OutboundTLSOptions
+		auto    bool
+	}{
+		{"std, fixed", option.OutboundTLSOptions{Mirage: true}, false},
+		{"std, auto", option.OutboundTLSOptions{Mirage: true, MirageAuto: true}, true},
+		{"utls, auto", option.OutboundTLSOptions{Mirage: true, MirageAuto: true, UTLS: &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			conn, err := newTestClient(t, tc.options).Client(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, adaptive := conn.NetConn().(*tf.AdaptiveMirageConn)
+			_, fixed := conn.NetConn().(*tf.MirageConn)
+			if adaptive != tc.auto || fixed == tc.auto {
+				t.Fatalf("adaptive = %v, fixed = %v, want auto = %v", adaptive, fixed, tc.auto)
+			}
+		})
+	}
+	// mirage_auto without mirage does nothing.
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	conn, err := newTestClient(t, option.OutboundTLSOptions{MirageAuto: true}).Client(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, adaptive := conn.NetConn().(*tf.AdaptiveMirageConn); adaptive {
+		t.Fatal("mirage_auto alone turned Mirage on")
+	}
+}

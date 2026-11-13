@@ -120,20 +120,25 @@ type OutboundTLSOptions struct {
 	// it hides the borrowed server name, so that name no longer has to be a
 	// host that is unblocked from Iran. MirageOffset overrides the default
 	// first-record size (5 bytes of the handshake message).
-	Mirage                     bool                                `json:"mirage,omitempty"`
-	MirageOffset               int                                 `json:"mirage_offset,omitempty"`
+	Mirage       bool `json:"mirage,omitempty"`
+	MirageOffset int  `json:"mirage_offset,omitempty"`
 	// The shape, which the offset cannot express. Two carriers measured on
 	// 2026-09-09 disagreed about it: one drops records that share a single TCP
 	// write, the other accepts either. Separate writes is the default because
 	// it is the only form measured to pass on both, and these exist so the
 	// next disagreement is a setting rather than a release.
-	MirageRecords              int                                 `json:"mirage_records,omitempty"`
-	MirageCoalesce             bool                                `json:"mirage_coalesce,omitempty"`
-	KernelTx                   bool                                `json:"kernel_tx,omitempty"`
-	KernelRx                   bool                                `json:"kernel_rx,omitempty"`
-	ECH                        *OutboundECHOptions                 `json:"ech,omitempty"`
-	UTLS                       *OutboundUTLSOptions                `json:"utls,omitempty"`
-	Reality                    *OutboundRealityOptions             `json:"reality,omitempty"`
+	MirageRecords  int  `json:"mirage_records,omitempty"`
+	MirageCoalesce bool `json:"mirage_coalesce,omitempty"`
+	// MirageAuto starts from the shape above and moves a server to the next
+	// candidate when its shape is reset, cut or met with silence, ending with
+	// the untouched ClientHello before the cycle starts again. It learns from
+	// the connections being made anyway, adding no probes of its own.
+	MirageAuto bool                    `json:"mirage_auto,omitempty"`
+	KernelTx   bool                    `json:"kernel_tx,omitempty"`
+	KernelRx   bool                    `json:"kernel_rx,omitempty"`
+	ECH        *OutboundECHOptions     `json:"ech,omitempty"`
+	UTLS       *OutboundUTLSOptions    `json:"utls,omitempty"`
+	Reality    *OutboundRealityOptions `json:"reality,omitempty"`
 
 	TLSTricks *TLSTricksOptions `json:"tls_tricks,omitempty"` //H
 }
