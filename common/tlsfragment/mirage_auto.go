@@ -207,7 +207,10 @@ func (b *MirageBook) report(key string, index int, ok bool) {
 		entry.proven = true
 		b.hint = index
 		if first {
-			event = func() { mirageLog(mirageLevelInfo, fmt.Sprintf("[Mirage] %s: %s gets through", key, shape)) }
+			// A warning, though it is good news: apps run the core at warn,
+			// and without this line a shape that works at once leaves no trace
+			// of Mirage in the log. Once per server and shape.
+			event = func() { mirageLog(mirageLevelWarn, fmt.Sprintf("[Mirage] %s: %s gets through", key, shape)) }
 		}
 		return
 	}
@@ -250,8 +253,8 @@ var mirageSinks struct {
 }
 
 // AddMirageLogger sends adaptive Mirage's verdicts to l, until the returned
-// func is called: a shape dropped and the one tried next as a warning, a first
-// success as info, a failure below the limit as debug.
+// func is called: a shape dropped and the one tried next, and a shape's first
+// success, as warnings; a failure below the limit as debug.
 //
 // A box adds its log when it starts and removes it when it closes. A box that
 // is only built and closed, as a config check is, never adds one, so it cannot

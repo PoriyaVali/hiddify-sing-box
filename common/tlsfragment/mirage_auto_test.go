@@ -80,7 +80,7 @@ func TestMirageBookLogsWhatItLearns(t *testing.T) {
 	// An unproven shape dropped at its first failure: a warning naming both.
 	book.pick("srv|192.0.2.1:443")
 	book.report("srv|192.0.2.1:443", 0, false)
-	// The next shape gets through: info, once.
+	// The next shape gets through: said once, at the level apps log at.
 	book.pick("srv|192.0.2.1:443")
 	book.report("srv|192.0.2.1:443", 1, true)
 	book.report("srv|192.0.2.1:443", 1, true)
@@ -93,7 +93,7 @@ func TestMirageBookLogsWhatItLearns(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, []line{
 		{mirageLevelWarn, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s dropped after 1 failure(s); next: %s", first, second)},
-		{mirageLevelInfo, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s gets through", second)},
+		{mirageLevelWarn, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s gets through", second)},
 		{mirageLevelDebug, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s failed (1 of 2)", second)},
 	}, lines)
 }
