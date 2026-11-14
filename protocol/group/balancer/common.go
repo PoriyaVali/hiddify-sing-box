@@ -85,6 +85,13 @@ func getModifiedDelay(his *adapter.URLTestHistory) uint16 {
 		// if the history is from cache, we can not trust the delay
 		delay += 20000
 	}
+	if his.TransferFailed && delay < 40000 {
+		// Answered the URL test but not a real upload and download: behind
+		// every node that did and every untested one, still ahead of dead
+		// ones, and in delay order among themselves - so if every node fails
+		// (an unreachable check endpoint) the fastest one is still picked.
+		delay += 40000
+	}
 	return delay
 }
 func getTagDelay(tag string, history map[string]*adapter.URLTestHistory) uint16 {
@@ -180,4 +187,41 @@ func getDelayMap(history map[string]*adapter.URLTestHistory) map[string]uint16 {
 
 	return delayMap
 
+}
+
+// transferCandidates is the current pick plus the k fastest nodes by the
+// ranking the strategies use, so a pick that fails its transfer check already
+// has checked successors.
+func transferCandidates(now string, history map[string]*adapter.URLTestHistory, k int) []string {
+	type ranked struct {
+		tag   string
+		delay uint16
+	}
+	var list []ranked
+	for tag, his := range history {
+		if delay := getModifiedDelay(his); delay < monitoring.TimeoutDelay {
+			list = append(list, ranked{tag, delay})
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].delay != list[j].delay {
+			return list[i].delay < list[j].delay
+		}
+		return list[i].tag < list[j].tag
+	})
+	limit := k
+	tags := make([]string, 0, k+1)
+	if now != "" {
+		tags = append(tags, now)
+		limit++
+	}
+	for _, r := range list {
+		if len(tags) >= limit {
+			break
+		}
+		if r.tag != now {
+			tags = append(tags, r.tag)
+		}
+	}
+	return tags
 }

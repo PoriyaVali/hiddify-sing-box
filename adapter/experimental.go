@@ -27,6 +27,10 @@ type URLTestHistory struct {
 	Delay       uint16         `json:"delay"`
 	IpInfo      *ipinfo.IpInfo `json:"ipinfo"`
 	IsFromCache bool           `json:"from_cache"`
+	// TransferFailed: the node answered the URL test but did not carry the
+	// transfer check's upload and download (common/transfercheck). Groups rank
+	// it behind every node that did, and still ahead of dead ones.
+	TransferFailed bool `json:"transfer_failed,omitempty"`
 }
 
 type URLTestHistoryStorage interface {

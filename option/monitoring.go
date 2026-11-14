@@ -9,4 +9,12 @@ type MonitoringOptions struct {
 	DebounceWindow badoption.Duration `json:"debounce_window,omitempty"`
 	URLTestTimeout badoption.Duration `json:"url_test_timeout,omitempty"`
 	IdleTimeout    badoption.Duration `json:"idle_timeout,omitempty"`
+	// TransferCheck makes groups prefer nodes that carried a real upload and
+	// download over ones that only answered the URL test (Doctor Mobile).
+	TransferCheck *TransferCheckOptions `json:"transfer_check,omitempty"`
+}
+
+type TransferCheckOptions struct {
+	Enabled   bool     `json:"enabled,omitempty"`
+	Endpoints []string `json:"endpoints,omitempty"`
 }
