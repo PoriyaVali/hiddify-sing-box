@@ -88,6 +88,12 @@ type OutboundMonitoring struct {
 	// and push the group from one pick to the next.
 	transferPassed common.TypedValue[time.Time]
 
+	// IP information (country, organisation) for each node's row, looked up
+	// after the node's result is out; see lookUpIPInfo. ipLookup is the
+	// lookup itself, replaceable in tests.
+	ipSlots  chan struct{}
+	ipLookup func(ctx context.Context, detour N.Dialer) (*ipinfo.IpInfo, error)
+
 	mainTicker *time.Ticker
 
 	priorityQueue chan *testTask
@@ -266,6 +272,7 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
 		normalQueue:   make(chan *testTask, 10000),
 		outbounds:     make(map[string]*outboundState),
 		groups:        make(map[string]*groupState),
+		ipSlots:       make(chan struct{}, 4),
 	}
 	if check := options.TransferCheck; check != nil && check.Enabled {
 		if err := transfercheck.ValidateEndpoints(check.Endpoints); err != nil {
@@ -621,25 +628,64 @@ func (m *OutboundMonitoring) tester(parent context.Context, tag string) (adapter
 		return his, parent.Err()
 	default:
 	}
-	if out.history.IpInfo == nil || out.from_cache {
+	m.lookUpIPInfo(tag, out)
+	m.logger.Info("outbound ", tag, " answered its URL test (", his.Delay, "ms)")
+	return his, nil
+}
 
-		ctx, cancel2 := context.WithTimeout(parent, m.urlTestTimeout)
-		defer cancel2()
-
-		newip, t, err := ipinfo.GetIpInfo(m.logger, ctx, out.outbound)
-		if err == nil {
-			his.IpInfo = mergeIpInfo(out.history.IpInfo, newip)
-			if t < his.Delay {
-				his.Delay = t
+// lookUpIPInfo fetches a node's IP information - the country and organisation
+// its row shows - once its test result is out, instead of before.
+//
+// It used to run inside the test, between the URL test passing and the result
+// being applied: a node's first latency waited for a lookup through it, of up
+// to the URL-test timeout again (5 s), and kept a test worker the whole time.
+// One lookup per node and four at a time: each is a handshake through a node,
+// and a burst of handshakes is what one carrier punishes. A node is looked up
+// while it has no information yet, or only what the cache had.
+func (m *OutboundMonitoring) lookUpIPInfo(tag string, state *outboundState) {
+	state.mu.Lock()
+	if state.ipLookupRunning || (state.history.IpInfo != nil && !state.from_cache) {
+		state.mu.Unlock()
+		return
+	}
+	state.ipLookupRunning = true
+	state.mu.Unlock()
+	go func() {
+		defer func() {
+			state.mu.Lock()
+			state.ipLookupRunning = false
+			state.mu.Unlock()
+		}()
+		select {
+		case m.ipSlots <- struct{}{}:
+			defer func() { <-m.ipSlots }()
+		case <-m.ctx.Done():
+			return
+		}
+		lookup := m.ipLookup
+		if lookup == nil {
+			lookup = func(ctx context.Context, detour N.Dialer) (*ipinfo.IpInfo, error) {
+				info, _, err := ipinfo.GetIpInfo(m.logger, ctx, detour)
+				return info, err
 			}
 		}
-	}
-	if his.IpInfo != nil {
-		m.logger.Info("outbound ", tag, " IP ", fmt.Sprint(his.IpInfo), " (", his.Delay, "ms): ", err)
-	} else {
-		m.logger.Info("outbound ", tag, " , IP: -          (", his.Delay, "ms)")
-	}
-	return his, nil
+		ctx, cancel := context.WithTimeout(m.ctx, m.urlTestTimeout)
+		info, err := lookup(ctx, state.outbound)
+		cancel()
+		if err != nil || info == nil || m.ctx.Err() != nil {
+			return
+		}
+		state.mu.Lock()
+		state.history.IpInfo = mergeIpInfo(state.history.IpInfo, info)
+		if m.history != nil {
+			m.history.StoreURLTestHistory(tag, &state.history)
+		}
+		groups := state.groupTags
+		state.mu.Unlock()
+		m.cacheDirty.Store(true)
+		m.logger.Info("outbound ", tag, " IP ", fmt.Sprint(info))
+		m.emitGroupEvent(groups)
+	}()
 }
 
 func (m *OutboundMonitoring) startCycleOnce() bool {
@@ -1008,6 +1054,8 @@ type outboundState struct {
 	testing        bool
 	enqueuedCycle  uint64
 	from_cache     bool
+
+	ipLookupRunning bool
 
 	history adapter.URLTestHistory
 
