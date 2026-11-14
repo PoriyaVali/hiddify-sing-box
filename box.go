@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/common/monitoring"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	"github.com/sagernet/sing-box/common/tls"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
@@ -53,6 +54,8 @@ type Box struct {
 	router          *route.Router
 	internalService []adapter.LifecycleService
 	done            chan struct{}
+	// removeMirageLog takes this box's log off adaptive Mirage's sinks.
+	removeMirageLog func()
 }
 
 type Options struct {
@@ -474,6 +477,11 @@ func (s *Box) preStart() error {
 	if err != nil {
 		return E.Cause(err, "start logger")
 	}
+	// Adaptive Mirage's verdicts go to this box's log while it runs. Added
+	// here, not in New, so a box only built for a config check takes nothing.
+	if s.removeMirageLog == nil {
+		s.removeMirageLog = tf.AddMirageLogger(s.logFactory.NewLogger("mirage"))
+	}
 	err = adapter.StartNamed(s.logger, adapter.StartStateInitialize, s.internalService) // cache-file clash-api v2ray-api
 	if err != nil {
 		return err
@@ -527,6 +535,9 @@ func (s *Box) Close() error {
 		return os.ErrClosed
 	default:
 		close(s.done)
+	}
+	if s.removeMirageLog != nil {
+		s.removeMirageLog()
 	}
 	closeTimeout := time.Second * 10
 	var err error

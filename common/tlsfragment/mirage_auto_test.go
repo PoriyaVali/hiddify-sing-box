@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -57,6 +58,91 @@ func TestMirageBookRotatesAndRemembers(t *testing.T) {
 	// A server seen afterwards starts where the last success was.
 	require.Equal(t, 1, book.pick("b"))
 }
+
+func TestMirageBookLogsWhatItLearns(t *testing.T) {
+	type line struct {
+		level mirageLevel
+		text  string
+	}
+	var mu sync.Mutex
+	var lines []line
+	previous := mirageLog
+	mirageLog = func(level mirageLevel, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, line{level, message})
+	}
+	t.Cleanup(func() { mirageLog = previous })
+
+	book := newMirageBook(defaultShape())
+	first, second := book.candidates[0], book.candidates[1]
+
+	// An unproven shape dropped at its first failure: a warning naming both.
+	book.pick("srv|192.0.2.1:443")
+	book.report("srv|192.0.2.1:443", 0, false)
+	// The next shape gets through: said once, at the level apps log at.
+	book.pick("srv|192.0.2.1:443")
+	book.report("srv|192.0.2.1:443", 1, true)
+	book.report("srv|192.0.2.1:443", 1, true)
+	// One failure of a proven shape is below the limit: debug only.
+	book.report("srv|192.0.2.1:443", 1, false)
+	// A stale verdict about a shape it left says nothing.
+	book.report("srv|192.0.2.1:443", 0, false)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []line{
+		{mirageLevelWarn, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s dropped after 1 failure(s); next: %s", first, second)},
+		{mirageLevelWarn, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s gets through", second)},
+		{mirageLevelDebug, fmt.Sprintf("[Mirage] srv|192.0.2.1:443: %s failed (1 of 2)", second)},
+	}, lines)
+}
+
+func TestMirageVerdictsGoToEveryRunningLog(t *testing.T) {
+	// Not parallel: the sinks are the process's.
+	first, second := &recordingLogger{}, &recordingLogger{}
+	removeFirst := AddMirageLogger(first)
+	removeSecond := AddMirageLogger(second)
+	t.Cleanup(removeFirst)
+	t.Cleanup(removeSecond)
+
+	book := newMirageBook(defaultShape())
+	book.pick("srv")
+	book.report("srv", 0, false)
+	require.Len(t, first.warnings, 1)
+	require.Len(t, second.warnings, 1)
+
+	// A box closing takes only its own log away; removing twice is harmless.
+	removeFirst()
+	removeFirst()
+	book.pick("other")
+	book.report("other", 0, false)
+	require.Len(t, first.warnings, 1)
+	require.Len(t, second.warnings, 2)
+
+	removeSecond()
+	book.pick("third")
+	book.report("third", 0, false)
+	require.Len(t, second.warnings, 2, "with no box running, verdicts are discarded")
+	require.NotPanics(t, func() { AddMirageLogger(nil)() })
+}
+
+type recordingLogger struct {
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (l *recordingLogger) Trace(...any) {}
+func (l *recordingLogger) Debug(...any) {}
+func (l *recordingLogger) Info(...any)  {}
+func (l *recordingLogger) Warn(args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warnings = append(l.warnings, fmt.Sprint(args...))
+}
+func (l *recordingLogger) Error(...any) {}
+func (l *recordingLogger) Fatal(...any) {}
+func (l *recordingLogger) Panic(...any) {}
 
 func TestMirageBookIgnoresVerdictsAboutAShapeItLeft(t *testing.T) {
 	t.Parallel()

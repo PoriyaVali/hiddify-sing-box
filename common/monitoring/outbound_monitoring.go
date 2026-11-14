@@ -72,6 +72,7 @@ type OutboundMonitoring struct {
 	idleTimeout      time.Duration
 	lastActive       common.TypedValue[time.Time]
 	workersRunning   atomic.Bool
+	closing          atomic.Bool
 	mainInterval     time.Duration
 	debounceWindow   time.Duration
 	urlTestTimeout   time.Duration
@@ -351,27 +352,42 @@ func (m *OutboundMonitoring) Start(stage adapter.StartStage) error {
 	return nil
 }
 
+// startTimerWorkers is called with m.access held (Touch).
 func (m *OutboundMonitoring) startTimerWorkers() {
+	if m.closing.Load() {
+		return
+	}
 	if !m.workersRunning.CompareAndSwap(false, true) {
 		return
 	}
-	m.mainTicker = time.NewTicker(m.mainInterval)
+	ticker := time.NewTicker(m.mainInterval)
+	m.mainTicker = ticker
 
-	m.pauseCallback = pause.RegisterTicker(m.pause, m.mainTicker, m.mainInterval, nil)
+	m.pauseCallback = pause.RegisterTicker(m.pause, ticker, m.mainInterval, nil)
 	m.schedulerWG.Add(1)
-	go m.scheduleLoop()
+	// The loop gets its ticker here. It used to read m.mainTicker itself, and
+	// a box closed right after it started (a quick disconnect, a network
+	// analysis trial) had set it to nil by then: the loop's select took .C of
+	// a nil ticker and the core crashed.
+	go m.scheduleLoop(ticker)
 }
+
 func (m *OutboundMonitoring) stopTimerWorkers() {
+	m.access.Lock()
 	if !m.workersRunning.CompareAndSwap(true, false) {
+		m.access.Unlock()
 		return
 	}
 	m.mainTicker.Stop()
 	m.mainTicker = nil
+	callback := m.pauseCallback
+	m.pauseCallback = nil
+	m.access.Unlock()
+
 	if m.cacheDirty.Load() {
 		m.saveHistory()
 	}
-
-	m.pause.UnregisterCallback(m.pauseCallback)
+	m.pause.UnregisterCallback(callback)
 }
 
 func (m *OutboundMonitoring) SignalChange(outboundTag string) error {
@@ -471,6 +487,9 @@ func (m *OutboundMonitoring) UnsubscribeGroup(groupTag string, observer <-chan G
 
 func (m *OutboundMonitoring) Close() error {
 	m.closerOnce.Do(func() {
+		// No new scheduler after this, even if something touches the monitor
+		// while it closes.
+		m.closing.Store(true)
 		m.stopTimerWorkers()
 
 		// close(m.priorityQueue)
@@ -488,10 +507,9 @@ func (m *OutboundMonitoring) Close() error {
 	return nil
 }
 
-func (m *OutboundMonitoring) scheduleLoop() {
+func (m *OutboundMonitoring) scheduleLoop(ticker *time.Ticker) {
 	m.logger.Info("outbound monitoring schedule loop started")
 	m.startCycleOnce()
-	ticker := m.mainTicker
 	for {
 		select {
 		case <-m.ctx.Done():

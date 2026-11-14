@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sagernet/sing/common/logger"
 )
 
 // Adaptive Mirage (Doctor Mobile).
@@ -185,16 +187,31 @@ func (b *MirageBook) evictOldest() {
 // verdict about a shape the server has already moved off is ignored, so a
 // burst of failures from connections opened together moves it only once.
 func (b *MirageBook) report(key string, index int, ok bool) {
+	// The verdict is logged after the lock is released.
+	var event func()
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer func() {
+		b.mu.Unlock()
+		if event != nil {
+			event()
+		}
+	}()
 	entry := b.entries[key]
 	if entry == nil || entry.index != index {
 		return
 	}
+	shape := b.candidates[index]
 	if ok {
+		first := !entry.proven
 		entry.failures = 0
 		entry.proven = true
 		b.hint = index
+		if first {
+			// A warning, though it is good news: apps run the core at warn,
+			// and without this line a shape that works at once leaves no trace
+			// of Mirage in the log. Once per server and shape.
+			event = func() { mirageLog(mirageLevelWarn, fmt.Sprintf("[Mirage] %s: %s gets through", key, shape)) }
+		}
 		return
 	}
 	entry.failures++
@@ -202,12 +219,93 @@ func (b *MirageBook) report(key string, index int, ok bool) {
 	if entry.proven {
 		limit = mirageProvenFailures
 	}
-	if entry.failures < limit {
+	failures := entry.failures
+	if failures < limit {
+		event = func() {
+			mirageLog(mirageLevelDebug, fmt.Sprintf("[Mirage] %s: %s failed (%d of %d)", key, shape, failures, limit))
+		}
 		return
 	}
 	entry.index = (entry.index + 1) % len(b.candidates)
 	entry.failures = 0
 	entry.proven = false
+	next := b.candidates[entry.index]
+	event = func() {
+		mirageLog(mirageLevelWarn, fmt.Sprintf("[Mirage] %s: %s dropped after %d failure(s); next: %s", key, shape, failures, next))
+	}
+}
+
+type mirageLevel int
+
+const (
+	mirageLevelDebug mirageLevel = iota
+	mirageLevelInfo
+	mirageLevelWarn
+)
+
+// mirageSinks holds the logs adaptive Mirage's verdicts go to: one per
+// running box. The book is shared by the whole process, so what it learns
+// goes to every running box's log.
+var mirageSinks struct {
+	access  sync.Mutex
+	next    uint64
+	loggers map[uint64]logger.Logger
+}
+
+// AddMirageLogger sends adaptive Mirage's verdicts to l, until the returned
+// func is called: a shape dropped and the one tried next, and a shape's first
+// success, as warnings; a failure below the limit as debug.
+//
+// A box adds its log when it starts and removes it when it closes. A box that
+// is only built and closed, as a config check is, never adds one, so it cannot
+// take the verdicts away from the box that carries the traffic.
+func AddMirageLogger(l logger.Logger) (remove func()) {
+	if l == nil {
+		return func() {}
+	}
+	mirageSinks.access.Lock()
+	defer mirageSinks.access.Unlock()
+	if mirageSinks.loggers == nil {
+		mirageSinks.loggers = make(map[uint64]logger.Logger)
+	}
+	id := mirageSinks.next
+	mirageSinks.next++
+	mirageSinks.loggers[id] = l
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			mirageSinks.access.Lock()
+			defer mirageSinks.access.Unlock()
+			delete(mirageSinks.loggers, id)
+		})
+	}
+}
+
+// MirageLogSinks is how many logs adaptive Mirage's verdicts currently go to.
+func MirageLogSinks() int {
+	mirageSinks.access.Lock()
+	defer mirageSinks.access.Unlock()
+	return len(mirageSinks.loggers)
+}
+
+// mirageLog writes one verdict. Tests replace it.
+var mirageLog = func(level mirageLevel, message string) {
+	mirageSinks.access.Lock()
+	loggers := make([]logger.Logger, 0, len(mirageSinks.loggers))
+	for _, l := range mirageSinks.loggers {
+		loggers = append(loggers, l)
+	}
+	mirageSinks.access.Unlock()
+	for _, l := range loggers {
+		switch level {
+		case mirageLevelWarn:
+			l.Warn(message)
+		case mirageLevelInfo:
+			l.Info(message)
+		default:
+			l.Debug(message)
+		}
+	}
 }
 
 const (
