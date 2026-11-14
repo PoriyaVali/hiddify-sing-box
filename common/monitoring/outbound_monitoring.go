@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/transfercheck"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -75,6 +77,16 @@ type OutboundMonitoring struct {
 	urlTestTimeout   time.Duration
 	workersCount     int
 	history          adapter.URLTestHistoryStorage
+
+	// Transfer check (Doctor Mobile): nil endpoints mean it is off.
+	transferEndpoints []string
+	transferSlots     chan struct{}
+	transferRoots     *tls.Config // nil: the system roots
+	// transferPassed is when any node last passed. Failures only count
+	// against a node while the endpoint is known to answer through some
+	// other node; otherwise an unreachable endpoint would fail every node
+	// and push the group from one pick to the next.
+	transferPassed common.TypedValue[time.Time]
 
 	mainTicker *time.Ticker
 
@@ -140,6 +152,7 @@ func (m *OutboundMonitoring) getUrlTest(outboundTag string) *adapter.URLTestHist
 	state.mu.Lock()
 	his := state.history
 	his.IsFromCache = state.from_cache
+	his.TransferFailed = m.transferEndpoints != nil && m.transferEndpointAnswers() && state.transfer.FailedNow(time.Now())
 	state.mu.Unlock()
 	return &his
 
@@ -253,6 +266,14 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
 		normalQueue:   make(chan *testTask, 10000),
 		outbounds:     make(map[string]*outboundState),
 		groups:        make(map[string]*groupState),
+	}
+	if check := options.TransferCheck; check != nil && check.Enabled {
+		if err := transfercheck.ValidateEndpoints(check.Endpoints); err != nil {
+			logger.Warn("transfer check disabled: ", err)
+		} else {
+			m.transferEndpoints = append([]string(nil), check.Endpoints...)
+			m.transferSlots = make(chan struct{}, 4)
+		}
 	}
 
 	return m, nil
@@ -989,6 +1010,8 @@ type outboundState struct {
 	from_cache     bool
 
 	history adapter.URLTestHistory
+
+	transfer transfercheck.State
 }
 
 type GroupEvent struct {
@@ -1064,4 +1087,95 @@ func (m *OutboundMonitoring) loadHistory() *History {
 		}
 	}
 	return history
+}
+
+func (m *OutboundMonitoring) transferEndpointAnswers() bool {
+	passed := m.transferPassed.Load()
+	return !passed.IsZero() && time.Since(passed) < transfercheck.FailedFor
+}
+
+// VerifyTransfer checks, in the background, that an outbound a group is
+// picking - or about to pick - carries a real upload and download. Only a
+// group's leading candidates are checked, about 200 KB each and again only
+// after 15 minutes, not every node every cycle. Once any node has passed, a
+// node that failed is ranked behind every node that did not, so the group
+// settles on the fastest node that carries data both ways, switching once.
+// While no node has passed (the endpoint may simply be unreachable), failures
+// change nothing: the user keeps the fastest node by delay.
+func (m *OutboundMonitoring) VerifyTransfer(tag string) {
+	if m == nil || m.transferEndpoints == nil {
+		return
+	}
+	state, ok := m.outbounds[tag]
+	if !ok {
+		return
+	}
+	if _, isGroup := m.groups[tag]; isGroup {
+		// A group's own pick is checked when that group reports it.
+		return
+	}
+	state.mu.Lock()
+	if state.invalid || state.history.Delay == 0 || state.history.Delay >= TimeoutDelay || !state.transfer.Due(time.Now()) {
+		state.mu.Unlock()
+		return
+	}
+	state.transfer.Running = true
+	state.mu.Unlock()
+
+	go func() {
+		var err error
+		select {
+		case m.transferSlots <- struct{}{}:
+			ctx, cancel := context.WithTimeout(m.ctx, 2*transfercheck.ProbeTimeout+time.Second)
+			err = transfercheck.Check(ctx, state.outbound, m.transferEndpoints, m.transferRoots)
+			cancel()
+			<-m.transferSlots
+		case <-m.ctx.Done():
+			err = m.ctx.Err()
+		}
+		if m.ctx.Err() != nil {
+			state.mu.Lock()
+			state.transfer.Running = false
+			state.mu.Unlock()
+			return
+		}
+		answeredBefore := m.transferEndpointAnswers()
+		if err == nil {
+			m.transferPassed.Store(time.Now())
+		}
+		state.mu.Lock()
+		before := state.transfer.Status
+		state.transfer.Running = false
+		state.transfer.CheckedAt = time.Now()
+		if err == nil {
+			state.transfer.Status = transfercheck.Healthy
+		} else {
+			state.transfer.Status = transfercheck.Failed
+		}
+		after := state.transfer.Status
+		state.mu.Unlock()
+		if err != nil {
+			m.logger.Warn("outbound ", tag, " answers the URL test but failed the transfer check: ", err)
+		} else if before != after {
+			m.logger.Info("outbound ", tag, " carried the transfer check's upload and download")
+		}
+		switch {
+		case !answeredBefore && m.transferEndpointAnswers():
+			// The first pass makes earlier failures count, in every group.
+			m.emitAllGroupEvents()
+		case before != after:
+			state.mu.Lock()
+			groups := state.groupTags
+			state.mu.Unlock()
+			m.emitGroupEvent(groups)
+		}
+	}()
+}
+
+func (m *OutboundMonitoring) emitAllGroupEvents() {
+	tags := make([]string, 0, len(m.groups))
+	for tag := range m.groups {
+		tags = append(tags, tag)
+	}
+	m.emitGroupEvent(tags)
 }

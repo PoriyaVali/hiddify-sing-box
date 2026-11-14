@@ -31,6 +31,7 @@ type STDClientConfig struct {
 	mirageOffset          int
 	mirageRecords         int
 	mirageCoalesce        bool
+	mirageAuto            bool
 }
 
 func (c *STDClientConfig) ServerName() string {
@@ -54,9 +55,14 @@ func (c *STDClientConfig) STDConfig() (*STDConfig, error) {
 }
 
 func (c *STDClientConfig) Client(conn net.Conn) (Conn, error) {
-	if c.mirage {
+	if c.mirage && c.mirageAuto {
+		conn = tf.NewAdaptiveMirageConn(conn, tf.MirageAutoBook(c.mirageOffset, c.mirageRecords, c.mirageCoalesce), c.config.ServerName)
+	} else if c.mirage {
 		conn = tf.NewMirageConn(conn, c.mirageOffset, c.mirageRecords, c.mirageCoalesce)
-	} else if c.recordFragment {
+	} else if c.fragment || c.recordFragment {
+		// `fragment` alone (TCP segments, no record split) used to be dropped
+		// here: only `record_fragment` opened the wrapper. Upstream fixed the
+		// same condition after 1.13.0.
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
 	return tls.Client(conn, c.config), nil
@@ -73,6 +79,7 @@ func (c *STDClientConfig) Clone() Config {
 		mirageOffset:          c.mirageOffset,
 		mirageRecords:         c.mirageRecords,
 		mirageCoalesce:        c.mirageCoalesce,
+		mirageAuto:            c.mirageAuto,
 	}
 }
 
@@ -100,6 +107,9 @@ func NewSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	tlsConfig.RootCAs = adapter.RootPoolFromContext(ctx)
 	if !options.DisableSNI {
 		tlsConfig.ServerName = serverName
+		if options.TLSTricks != nil && options.TLSTricks.MixedCaseSNI {
+			tlsConfig.ServerName = mixedCaseServerName(serverName)
+		}
 	}
 	if options.Insecure {
 		tlsConfig.InsecureSkipVerify = options.Insecure
@@ -208,7 +218,7 @@ func NewSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	} else if len(clientCertificate) > 0 || len(clientKey) > 0 {
 		return nil, E.New("client certificate and client key must be provided together")
 	}
-	var config Config = &STDClientConfig{ctx, &tlsConfig, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset, options.MirageRecords, options.MirageCoalesce}
+	var config Config = &STDClientConfig{ctx, &tlsConfig, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset, options.MirageRecords, options.MirageCoalesce, options.MirageAuto}
 	if options.ECH != nil && options.ECH.Enabled {
 		var err error
 		config, err = parseECHClientConfig(ctx, config.(ECHCapableConfig), options)

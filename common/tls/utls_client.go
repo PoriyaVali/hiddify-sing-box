@@ -36,6 +36,7 @@ type UTLSClientConfig struct {
 	mirageOffset          int
 	mirageRecords         int
 	mirageCoalesce        bool
+	mirageAuto            bool
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -62,9 +63,14 @@ func (c *UTLSClientConfig) STDConfig() (*STDConfig, error) {
 }
 
 func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
-	if c.mirage {
+	if c.mirage && c.mirageAuto {
+		conn = tf.NewAdaptiveMirageConn(conn, tf.MirageAutoBook(c.mirageOffset, c.mirageRecords, c.mirageCoalesce), c.config.ServerName)
+	} else if c.mirage {
 		conn = tf.NewMirageConn(conn, c.mirageOffset, c.mirageRecords, c.mirageCoalesce)
-	} else if c.recordFragment {
+	} else if c.fragment || c.recordFragment {
+		// `fragment` alone (TCP segments, no record split) used to be dropped
+		// here: only `record_fragment` opened the wrapper. Upstream fixed the
+		// same condition after 1.13.0.
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
 	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos}, nil
@@ -77,7 +83,7 @@ func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []by
 func (c *UTLSClientConfig) Clone() Config {
 	return &UTLSClientConfig{
 		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment,
-		c.mirage, c.mirageOffset, c.mirageRecords, c.mirageCoalesce,
+		c.mirage, c.mirageOffset, c.mirageRecords, c.mirageCoalesce, c.mirageAuto,
 	}
 }
 
@@ -165,6 +171,10 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	tlsConfig.RootCAs = adapter.RootPoolFromContext(ctx)
 	if !options.DisableSNI {
 		tlsConfig.ServerName = serverName
+		// REALITY servers look the name up case-sensitively, so it stays as is.
+		if options.TLSTricks != nil && options.TLSTricks.MixedCaseSNI && (options.Reality == nil || !options.Reality.Enabled) {
+			tlsConfig.ServerName = mixedCaseServerName(serverName)
+		}
 	}
 	if options.Insecure {
 		tlsConfig.InsecureSkipVerify = options.Insecure
@@ -262,7 +272,7 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
-	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset, options.MirageRecords, options.MirageCoalesce}
+	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, options.Mirage, options.MirageOffset, options.MirageRecords, options.MirageCoalesce, options.MirageAuto}
 	if options.ECH != nil && options.ECH.Enabled {
 		if options.Reality != nil && options.Reality.Enabled {
 			return nil, E.New("Reality is conflict with ECH")

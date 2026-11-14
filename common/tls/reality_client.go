@@ -129,7 +129,9 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	// server name sat in the clear for the censor to match on — which is why a
 	// borrowed site that is blocked from Iran killed the node. Splitting the
 	// ClientHello here hides that name, freeing the choice of borrowed site.
-	if e.uClient.mirage {
+	if e.uClient.mirage && e.uClient.mirageAuto {
+		conn = tf.NewAdaptiveMirageConn(conn, tf.MirageAutoBook(e.uClient.mirageOffset, e.uClient.mirageRecords, e.uClient.mirageCoalesce), uConfig.ServerName)
+	} else if e.uClient.mirage {
 		conn = tf.NewMirageConn(conn, e.uClient.mirageOffset, e.uClient.mirageRecords, e.uClient.mirageCoalesce)
 	}
 	uConn := utls.UClient(conn, uConfig, e.uClient.id)

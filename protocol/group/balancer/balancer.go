@@ -136,6 +136,12 @@ func (s *Balancer) worker() {
 			if s.strategyFn.UpdateOutboundsInfo(outbounds) {
 				s.interruptGroup.Interrupt(s.interruptExternalConnections)
 			}
+			// Make sure the pick and the next candidates carry data both
+			// ways. Checking a few together means the group can switch once,
+			// to a verified node, instead of trying them one at a time.
+			for _, tag := range transferCandidates(s.strategyFn.Now(), outbounds, 3) {
+				s.monitor.VerifyTransfer(tag)
+			}
 
 		}
 	}
