@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sagernet/sing/common/logger"
 )
 
 // Adaptive Mirage (Doctor Mobile).
@@ -185,16 +187,28 @@ func (b *MirageBook) evictOldest() {
 // verdict about a shape the server has already moved off is ignored, so a
 // burst of failures from connections opened together moves it only once.
 func (b *MirageBook) report(key string, index int, ok bool) {
+	// The verdict is logged after the lock is released.
+	var event func()
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer func() {
+		b.mu.Unlock()
+		if event != nil {
+			event()
+		}
+	}()
 	entry := b.entries[key]
 	if entry == nil || entry.index != index {
 		return
 	}
+	shape := b.candidates[index]
 	if ok {
+		first := !entry.proven
 		entry.failures = 0
 		entry.proven = true
 		b.hint = index
+		if first {
+			event = func() { mirageLog(mirageLevelInfo, fmt.Sprintf("[Mirage] %s: %s gets through", key, shape)) }
+		}
 		return
 	}
 	entry.failures++
@@ -202,12 +216,60 @@ func (b *MirageBook) report(key string, index int, ok bool) {
 	if entry.proven {
 		limit = mirageProvenFailures
 	}
-	if entry.failures < limit {
+	failures := entry.failures
+	if failures < limit {
+		event = func() {
+			mirageLog(mirageLevelDebug, fmt.Sprintf("[Mirage] %s: %s failed (%d of %d)", key, shape, failures, limit))
+		}
 		return
 	}
 	entry.index = (entry.index + 1) % len(b.candidates)
 	entry.failures = 0
 	entry.proven = false
+	next := b.candidates[entry.index]
+	event = func() {
+		mirageLog(mirageLevelWarn, fmt.Sprintf("[Mirage] %s: %s dropped after %d failure(s); next: %s", key, shape, failures, next))
+	}
+}
+
+type mirageLevel int
+
+const (
+	mirageLevelDebug mirageLevel = iota
+	mirageLevelInfo
+	mirageLevelWarn
+)
+
+type mirageLoggerHolder struct{ logger logger.Logger }
+
+var mirageLogger atomic.Pointer[mirageLoggerHolder]
+
+// SetMirageLogger points adaptive Mirage's verdicts at a logger. box.New gives
+// it the box's own, so they land in the core log: a shape dropped and the one
+// tried next as a warning, a first success as info, a failure below the limit
+// as debug. Nil discards them.
+func SetMirageLogger(l logger.Logger) {
+	if l == nil {
+		mirageLogger.Store(nil)
+		return
+	}
+	mirageLogger.Store(&mirageLoggerHolder{l})
+}
+
+// mirageLog writes one verdict. Tests replace it.
+var mirageLog = func(level mirageLevel, message string) {
+	holder := mirageLogger.Load()
+	if holder == nil {
+		return
+	}
+	switch level {
+	case mirageLevelWarn:
+		holder.logger.Warn(message)
+	case mirageLevelInfo:
+		holder.logger.Info(message)
+	default:
+		holder.logger.Debug(message)
+	}
 }
 
 const (
