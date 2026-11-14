@@ -12,6 +12,7 @@ import (
 
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // recordingConn keeps every Write separately, which is what reaches the wire
@@ -267,4 +268,74 @@ func TestDefaultDialerAppliesTLSFragment(t *testing.T) {
 			}
 		})
 	}
+}
+
+type earlyConn struct{ recordingConn }
+
+func (c *earlyConn) NeedHandshake() bool { return true }
+
+// The wrapper must not hide what the router needs from the connection under
+// it: half-close, and a TCP Fast Open connection's early write.
+func TestTLSFragmentKeepsTheConnectionsAbilities(t *testing.T) {
+	t.Parallel()
+	config := newTLSFragmentConfig(option.TLSFragmentOptions{Enabled: true, Size: "10-30", Sleep: "0"})
+
+	t.Run("half-close", func(t *testing.T) {
+		t.Parallel()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			request, _ := io.ReadAll(conn) // until the client's half-close
+			conn.Write(append([]byte("echo:"), request...))
+		}()
+		raw, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn := config.wrap(raw)
+		defer conn.Close()
+		if _, err := conn.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		closer, ok := conn.(N.WriteCloser)
+		if !ok {
+			t.Fatal("the wrapper hides CloseWrite")
+		}
+		if err := closer.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		answer, err := io.ReadAll(conn)
+		if err != nil || string(answer) != "echo:ping" {
+			t.Fatalf("after a half-close got %q, %v", answer, err)
+		}
+	})
+
+	t.Run("fast open", func(t *testing.T) {
+		t.Parallel()
+		wire := &earlyConn{}
+		conn := config.wrap(wire)
+		if !N.NeedHandshakeForWrite(conn) {
+			t.Fatal("the wrapper hides the early-write request")
+		}
+		if _, err := conn.Write(nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(wire.writes) != 1 || len(wire.writes[0]) != 0 {
+			t.Fatalf("the empty write did not reach the connection: %d writes", len(wire.writes))
+		}
+		if _, err := conn.Write(clientHello(t)); err != nil {
+			t.Fatal(err)
+		}
+		if records := parseRecords(t, wire.writes[1]); len(records) < 2 {
+			t.Fatal("the ClientHello after an empty write was not fragmented")
+		}
+	})
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // Hiddify's dialer-level `tls_fragment` option (Doctor Mobile).
@@ -125,7 +126,10 @@ func (c *tlsFragmentConn) Write(b []byte) (int, error) {
 		return c.Conn.Write(b)
 	}
 	if len(b) == 0 {
-		return 0, nil
+		// An empty write is how the router opens a TCP Fast Open connection
+		// that has nothing to send yet (a server-first protocol): pass it on
+		// and keep waiting for the ClientHello.
+		return c.Conn.Write(b)
 	}
 	defer c.done.Store(true)
 	recordLen, ok := clientHelloRecordLen(b)
@@ -189,6 +193,26 @@ func (c *tlsFragmentConn) writeRecords(header []byte, payload []byte) error {
 		return err
 	}
 	return nil
+}
+
+// CloseWrite keeps TCP half-close working: the router type-asserts the
+// destination itself, so without this a client that half-closes would have
+// the whole connection closed and lose the rest of the server's answer.
+func (c *tlsFragmentConn) CloseWrite() error {
+	if closer, ok := c.Conn.(N.WriteCloser); ok {
+		return closer.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+// NeedHandshake passes through a TCP Fast Open connection's request for an
+// early write, which the router also checks with a plain type assertion.
+func (c *tlsFragmentConn) NeedHandshake() bool {
+	//nolint:staticcheck // EarlyConn is what the router and slowOpenConn use.
+	if early, ok := c.Conn.(N.EarlyConn); ok {
+		return early.NeedHandshake()
+	}
+	return false
 }
 
 func (c *tlsFragmentConn) Upstream() any {
