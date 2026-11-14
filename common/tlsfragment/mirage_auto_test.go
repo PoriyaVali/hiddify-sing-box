@@ -98,18 +98,33 @@ func TestMirageBookLogsWhatItLearns(t *testing.T) {
 	}, lines)
 }
 
-func TestMirageLoggerReceivesVerdicts(t *testing.T) {
-	sink := &recordingLogger{}
-	SetMirageLogger(sink)
-	t.Cleanup(func() { SetMirageLogger(nil) })
+func TestMirageVerdictsGoToEveryRunningLog(t *testing.T) {
+	// Not parallel: the sinks are the process's.
+	first, second := &recordingLogger{}, &recordingLogger{}
+	removeFirst := AddMirageLogger(first)
+	removeSecond := AddMirageLogger(second)
+	t.Cleanup(removeFirst)
+	t.Cleanup(removeSecond)
+
 	book := newMirageBook(defaultShape())
 	book.pick("srv")
 	book.report("srv", 0, false)
-	require.Len(t, sink.warnings, 1)
-	SetMirageLogger(nil)
+	require.Len(t, first.warnings, 1)
+	require.Len(t, second.warnings, 1)
+
+	// A box closing takes only its own log away; removing twice is harmless.
+	removeFirst()
+	removeFirst()
 	book.pick("other")
-	book.report("other", 1, false)
-	require.Len(t, sink.warnings, 1, "a nil logger discards verdicts")
+	book.report("other", 0, false)
+	require.Len(t, first.warnings, 1)
+	require.Len(t, second.warnings, 2)
+
+	removeSecond()
+	book.pick("third")
+	book.report("third", 0, false)
+	require.Len(t, second.warnings, 2, "with no box running, verdicts are discarded")
+	require.NotPanics(t, func() { AddMirageLogger(nil)() })
 }
 
 type recordingLogger struct {

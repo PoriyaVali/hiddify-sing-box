@@ -54,6 +54,8 @@ type Box struct {
 	router          *route.Router
 	internalService []adapter.LifecycleService
 	done            chan struct{}
+	// removeMirageLog takes this box's log off adaptive Mirage's sinks.
+	removeMirageLog func()
 }
 
 type Options struct {
@@ -160,8 +162,6 @@ func New(options Options) (*Box, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create log factory")
 	}
-	// Adaptive Mirage's verdicts go to this box's log, beside the rest.
-	tf.SetMirageLogger(logFactory.NewLogger("mirage"))
 
 	var internalServices []adapter.LifecycleService
 	certificateOptions := common.PtrValueOrDefault(options.Certificate)
@@ -477,6 +477,11 @@ func (s *Box) preStart() error {
 	if err != nil {
 		return E.Cause(err, "start logger")
 	}
+	// Adaptive Mirage's verdicts go to this box's log while it runs. Added
+	// here, not in New, so a box only built for a config check takes nothing.
+	if s.removeMirageLog == nil {
+		s.removeMirageLog = tf.AddMirageLogger(s.logFactory.NewLogger("mirage"))
+	}
 	err = adapter.StartNamed(s.logger, adapter.StartStateInitialize, s.internalService) // cache-file clash-api v2ray-api
 	if err != nil {
 		return err
@@ -530,6 +535,9 @@ func (s *Box) Close() error {
 		return os.ErrClosed
 	default:
 		close(s.done)
+	}
+	if s.removeMirageLog != nil {
+		s.removeMirageLog()
 	}
 	closeTimeout := time.Second * 10
 	var err error

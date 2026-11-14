@@ -240,35 +240,68 @@ const (
 	mirageLevelWarn
 )
 
-type mirageLoggerHolder struct{ logger logger.Logger }
+// mirageSinks holds the logs adaptive Mirage's verdicts go to: one per
+// running box. The book is shared by the whole process, so what it learns
+// goes to every running box's log.
+var mirageSinks struct {
+	access  sync.Mutex
+	next    uint64
+	loggers map[uint64]logger.Logger
+}
 
-var mirageLogger atomic.Pointer[mirageLoggerHolder]
-
-// SetMirageLogger points adaptive Mirage's verdicts at a logger. box.New gives
-// it the box's own, so they land in the core log: a shape dropped and the one
-// tried next as a warning, a first success as info, a failure below the limit
-// as debug. Nil discards them.
-func SetMirageLogger(l logger.Logger) {
+// AddMirageLogger sends adaptive Mirage's verdicts to l, until the returned
+// func is called: a shape dropped and the one tried next as a warning, a first
+// success as info, a failure below the limit as debug.
+//
+// A box adds its log when it starts and removes it when it closes. A box that
+// is only built and closed, as a config check is, never adds one, so it cannot
+// take the verdicts away from the box that carries the traffic.
+func AddMirageLogger(l logger.Logger) (remove func()) {
 	if l == nil {
-		mirageLogger.Store(nil)
-		return
+		return func() {}
 	}
-	mirageLogger.Store(&mirageLoggerHolder{l})
+	mirageSinks.access.Lock()
+	defer mirageSinks.access.Unlock()
+	if mirageSinks.loggers == nil {
+		mirageSinks.loggers = make(map[uint64]logger.Logger)
+	}
+	id := mirageSinks.next
+	mirageSinks.next++
+	mirageSinks.loggers[id] = l
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			mirageSinks.access.Lock()
+			defer mirageSinks.access.Unlock()
+			delete(mirageSinks.loggers, id)
+		})
+	}
+}
+
+// MirageLogSinks is how many logs adaptive Mirage's verdicts currently go to.
+func MirageLogSinks() int {
+	mirageSinks.access.Lock()
+	defer mirageSinks.access.Unlock()
+	return len(mirageSinks.loggers)
 }
 
 // mirageLog writes one verdict. Tests replace it.
 var mirageLog = func(level mirageLevel, message string) {
-	holder := mirageLogger.Load()
-	if holder == nil {
-		return
+	mirageSinks.access.Lock()
+	loggers := make([]logger.Logger, 0, len(mirageSinks.loggers))
+	for _, l := range mirageSinks.loggers {
+		loggers = append(loggers, l)
 	}
-	switch level {
-	case mirageLevelWarn:
-		holder.logger.Warn(message)
-	case mirageLevelInfo:
-		holder.logger.Info(message)
-	default:
-		holder.logger.Debug(message)
+	mirageSinks.access.Unlock()
+	for _, l := range loggers {
+		switch level {
+		case mirageLevelWarn:
+			l.Warn(message)
+		case mirageLevelInfo:
+			l.Info(message)
+		default:
+			l.Debug(message)
+		}
 	}
 }
 
